@@ -6,7 +6,7 @@
 use crate::{
     error::AppError,
     mosaic,
-    shading::{Planes, Shading},
+    shading::{self, Planes, Shading},
     source::{Source, bicubic, cubic_weights},
     tile::{BUFFER, SIZE, TILE, TileWindow},
 };
@@ -26,23 +26,92 @@ type Key = (Arc<str>, u8, u32, u32);
 /// Left empty if that render fails or panics, for the next to retry.
 type Slot = Arc<Mutex<Option<Picture>>>;
 
-/// Rendered ancestor tiles, least recently used dropped first. Each serves up
-/// to 4^k children, and its neighbours are needed along its edges.
+/// Rendered ancestor tiles, each serving up to 4^k children, least recently
+/// used dropped first. Other shadings are evicted first while they hold over
+/// half the cap, so one-off shadings, as a client dragging a shading slider
+/// sends, cannot flush the default's ancestors that every other visitor needs.
 pub struct Ancestors {
     cap: usize,
+    /// `Key`'s shading for `shading::DEFAULT`, and for it on the opaque white
+    /// background a client asks for when the shading is its base layer.
+    default: [Arc<str>; 2],
     cache: Mutex<Cache>,
+}
+
+struct Entry {
+    slot: Slot,
+    used: u64,
+    default: bool,
 }
 
 #[derive(Default)]
 struct Cache {
-    slots: HashMap<Key, (Slot, u64)>,
+    entries: HashMap<Key, Entry>,
     clock: u64,
+    /// Entries of shadings other than the default.
+    others: usize,
+}
+
+impl Cache {
+    fn lru(&self, default: bool) -> Option<Key> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| e.default == default)
+            .min_by_key(|(_, e)| e.used)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// The slot for `key`, added if new.
+    fn slot(&mut self, key: Key, default: bool, cap: usize) -> Slot {
+        self.clock += 1;
+
+        let used = self.clock;
+
+        if let Some(e) = self.entries.get_mut(&key) {
+            e.used = used;
+
+            return e.slot.clone();
+        }
+
+        let slot = Slot::default();
+
+        self.entries.insert(
+            key,
+            Entry {
+                slot: slot.clone(),
+                used,
+                default,
+            },
+        );
+
+        if !default {
+            self.others += 1;
+        }
+
+        if self.entries.len() > cap {
+            let evict_default = self.others <= cap / 2;
+
+            // Whichever kind is over its share has an entry to evict.
+            if let Some(k) = self.lru(evict_default)
+                && self.entries.remove(&k).is_some_and(|e| !e.default)
+            {
+                self.others -= 1;
+            }
+        }
+
+        slot
+    }
 }
 
 impl Ancestors {
     pub fn new(cap: usize) -> Self {
         Self {
             cap,
+            default: [
+                shading::DEFAULT.to_string(),
+                shading::DEFAULT.replacen("00000000", "ffffffff", 1),
+            ]
+            .map(|s| shading_key(&Shading::parse(&s).expect("default shading"))),
             cache: Mutex::default(),
         }
     }
@@ -53,38 +122,11 @@ impl Ancestors {
         (key, shading): (&Arc<str>, &Shading),
         (z, x, y): (u8, u32, u32),
     ) -> Result<Picture, AppError> {
-        let slot = {
-            let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
-
-            cache.clock += 1;
-
-            let now = cache.clock;
-            let key = (key.clone(), z, x, y);
-
-            if let Some((slot, used)) = cache.slots.get_mut(&key) {
-                *used = now;
-
-                slot.clone()
-            } else {
-                let slot = Slot::default();
-
-                cache.slots.insert(key, (slot.clone(), now));
-
-                if cache.slots.len() > self.cap {
-                    let oldest = cache
-                        .slots
-                        .iter()
-                        .min_by_key(|(_, (_, used))| *used)
-                        .map(|(k, _)| k.clone());
-
-                    if let Some(k) = oldest {
-                        cache.slots.remove(&k);
-                    }
-                }
-
-                slot
-            }
-        };
+        let slot = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .slot((key.clone(), z, x, y), self.default.contains(key), self.cap);
 
         let mut filled = slot.lock().unwrap_or_else(PoisonError::into_inner);
 
@@ -118,6 +160,11 @@ impl Ancestors {
 
         Ok(picture)
     }
+}
+
+/// The cache key of `shading`: spellings of the same shading share ancestors.
+pub fn shading_key(shading: &Shading) -> Arc<str> {
+    format!("{shading:?}").into()
 }
 
 /// Ancestor-zoom pixels `x0..x1`, `y0..y1` holding every bicubic tap of the
@@ -311,6 +358,46 @@ impl Plan {
                 planes.g[i] = g.clamp(0.0, a);
                 planes.b[i] = b.clamp(0.0, a);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(s: &str, x: u32) -> Key {
+        (Arc::from(s), 12, x, 0)
+    }
+
+    #[test]
+    fn other_shadings_cannot_flush_the_default() {
+        let (mut cache, cap) = (Cache::default(), 10);
+
+        for x in 0..8 {
+            cache.slot(key("default", x), true, cap);
+        }
+
+        for n in 0..100 {
+            cache.slot(key(&format!("slider{n}"), 0), false, cap);
+        }
+
+        assert_eq!(cache.entries.len(), cap);
+        assert_eq!(cache.others, cap / 2);
+        assert!((3..8).all(|x| cache.entries.contains_key(&key("default", x))));
+    }
+
+    #[test]
+    fn either_kind_fills_the_cap_alone() {
+        for default in [true, false] {
+            let (mut cache, cap) = (Cache::default(), 10);
+
+            for x in 0..30 {
+                cache.slot(key("s", x), default, cap);
+            }
+
+            assert_eq!(cache.entries.len(), cap);
+            assert!((20..30).all(|x| cache.entries.contains_key(&key("s", x))));
         }
     }
 }

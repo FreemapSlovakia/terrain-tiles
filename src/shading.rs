@@ -82,7 +82,7 @@ impl Shading {
         let mut components = Vec::new();
 
         for (n, part) in parts.enumerate() {
-            // Each component is a full pass, and unique query strings miss the cache.
+            // Each component is a full pass over the tile, and every string renders anew.
             if n == MAX_COMPONENTS {
                 return Err(AppError::BadRequest(format!(
                     "more than {MAX_COMPONENTS} components"

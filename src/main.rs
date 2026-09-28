@@ -394,8 +394,7 @@ async fn hillshade(
     request: HeaderMap,
 ) -> Result<Response, AppError> {
     let shading = Shading::parse(q.shading.as_deref().unwrap_or(shading::DEFAULT))?;
-    // Spellings of the same shading share cached ancestors.
-    let key: Arc<str> = format!("{shading:?}").into();
+    let key = overzoom::shading_key(&shading);
 
     serve_tile(
         state,
