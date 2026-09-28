@@ -120,7 +120,7 @@ fn main() {
 
                 let Some(m) = stats
                     .get("read + mosaic")
-                    .time(|| mosaic::read(&sources, &w).unwrap())
+                    .time(|| mosaic::read(&sources, &w, false).unwrap())
                 else {
                     continue;
                 };

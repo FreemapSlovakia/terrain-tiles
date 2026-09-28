@@ -20,7 +20,7 @@ use terrain_tiles::{
     encode::{self, Format},
     error::AppError,
     mosaic,
-    overzoom::{self, Ancestors},
+    overzoom::{self, Ancestors, Plan},
     shading::{self, Shading},
     source::Source,
     tile::TileWindow,
@@ -252,7 +252,7 @@ async fn serve_tile(
     (z, x, y): (u8, u32, u32),
     request: &HeaderMap,
     dependencies: impl FnOnce(&TileWindow, &[Source]) -> Vec<TileWindow>,
-    work: impl FnOnce(&[Source], TileWindow) -> Result<Tile, AppError> + Send + 'static,
+    work: impl FnOnce(&AppState, TileWindow) -> Result<Tile, AppError> + Send + 'static,
 ) -> Result<Response, AppError> {
     let w = TileWindow::new(z, x, y, state.max_zoom).ok_or(AppError::NotFound)?;
     let mut windows = dependencies(&w, &state.sources);
@@ -283,7 +283,7 @@ async fn serve_tile(
     let tile = tokio::task::spawn_blocking(move || {
         let _permit = permit;
 
-        work(&state.sources, w)
+        work(&state, w)
     })
     .await
     .expect("tile task panicked")?;
@@ -317,8 +317,8 @@ async fn elevation(
         zxy,
         &request,
         |_, _| Vec::new(),
-        |sources, w| {
-            let m = mosaic::read(sources, &w)?.ok_or(AppError::NotFound)?;
+        |state, w| {
+            let m = mosaic::read(&state.sources, &w, false)?.ok_or(AppError::NotFound)?;
 
             Ok(Tile {
                 body: elevation::encode(&m.heights, w.z)?,
@@ -345,50 +345,31 @@ async fn hillshade(
 ) -> Result<Response, AppError> {
     let shading = Shading::parse(q.shading.as_deref().unwrap_or(shading::DEFAULT))?;
     // Spellings of the same shading share cached ancestors.
-    let key = format!("{shading:?}");
-    let st = state.clone();
+    let key: Arc<str> = format!("{shading:?}").into();
 
     serve_tile(
         state,
         zxy,
         &request,
         overzoom::dependencies,
-        move |sources, w| {
+        move |state, w| {
+            let sources = &state.sources;
+
             // Outside all coverage the tile is the background, not a 404, so a
             // client can keep its error tile for real failures.
-            let (planes, credited) = match mosaic::read(sources, &w)? {
+            let (planes, credited) = match mosaic::read(sources, &w, true)? {
                 Some(m) => {
-                    // Where every pixel is scaled up from ancestors, nothing is shaded here.
-                    let direct = overzoom::any_direct(&m.native, w.z);
+                    let plan =
+                        Plan::new(&m.native, &w, sources, (&key, &shading), &state.ancestors);
 
-                    let mut planes = if direct {
+                    // Where every pixel is scaled up from ancestors, nothing is shaded here.
+                    let mut planes = if plan.any_direct() {
                         shading.render(&m.heights, &w)
                     } else {
                         shading.background_planes()
                     };
 
-                    let apply = |planes: &mut _| {
-                        overzoom::apply(
-                            planes,
-                            &m.native,
-                            &w,
-                            sources,
-                            (&key, &shading),
-                            &st.ancestors,
-                        )
-                    };
-
-                    // Pixels whose ancestors fail keep their own, pillowed shading
-                    // rather than failing the tile.
-                    if let Err(e) = apply(&mut planes) {
-                        eprintln!("hillshade {}/{}/{}: ancestors: {e}", w.z, w.x, w.y);
-
-                        if !direct {
-                            planes = shading.render(&m.heights, &w);
-
-                            let _ = apply(&mut planes);
-                        }
-                    }
+                    plan.paint(&mut planes, &w);
 
                     (planes, m.credited)
                 }

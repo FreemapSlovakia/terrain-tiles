@@ -12,7 +12,7 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 /// An ancestor tile's shading, premultiplied RGBA. 16 bits, as it is
@@ -20,9 +20,10 @@ use std::{
 type Picture = Arc<Vec<[u16; 4]>>;
 
 /// Canonical shading, zoom, x, y.
-type Key = (String, u8, u32, u32);
+type Key = (Arc<str>, u8, u32, u32);
 
 /// Filled by the first worker to need the ancestor; the others wait on it.
+/// Left empty if that render fails or panics, for the next to retry.
 type Slot = Arc<Mutex<Option<Picture>>>;
 
 /// Rendered ancestor tiles, least recently used dropped first. Each serves up
@@ -49,16 +50,16 @@ impl Ancestors {
     fn get(
         &self,
         sources: &[Source],
-        (key, shading): (&str, &Shading),
+        (key, shading): (&Arc<str>, &Shading),
         (z, x, y): (u8, u32, u32),
     ) -> Result<Picture, AppError> {
         let slot = {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
 
             cache.clock += 1;
 
             let now = cache.clock;
-            let key = (key.to_string(), z, x, y);
+            let key = (key.clone(), z, x, y);
 
             if let Some((slot, used)) = cache.slots.get_mut(&key) {
                 *used = now;
@@ -85,7 +86,7 @@ impl Ancestors {
             }
         };
 
-        let mut filled = slot.lock().unwrap();
+        let mut filled = slot.lock().unwrap_or_else(PoisonError::into_inner);
 
         if let Some(p) = &*filled {
             return Ok(p.clone());
@@ -93,7 +94,7 @@ impl Ancestors {
 
         let w = TileWindow::new(z, x, y, z).ok_or(AppError::NotFound)?;
 
-        let planes = match mosaic::read(sources, &w)? {
+        let planes = match mosaic::read(sources, &w, false)? {
             Some(m) => shading.render(&m.heights, &w),
             None => shading.background_planes(),
         };
@@ -151,19 +152,24 @@ fn ancestor_tiles(w: &TileWindow, za: u8) -> Vec<(u32, u32)> {
     tiles
 }
 
-/// The ancestor windows a hillshade tile at `w` may be scaled up from: one set
-/// per source zoom coarser than `w.z`.
-pub fn dependencies(w: &TileWindow, sources: &[Source]) -> Vec<TileWindow> {
+/// The source zooms coarser than `z`, ascending.
+fn coarse_zooms(sources: &[Source], z: u8) -> Vec<u8> {
     let mut zooms: Vec<u8> = sources
         .iter()
         .map(|s| s.zoom)
-        .filter(|&z| z < w.z)
+        .filter(|&za| za < z)
         .collect();
 
     zooms.sort_unstable();
     zooms.dedup();
 
     zooms
+}
+
+/// The ancestor windows a hillshade tile at `w` may be scaled up from: one set
+/// per source zoom coarser than `w.z`.
+pub fn dependencies(w: &TileWindow, sources: &[Source]) -> Vec<TileWindow> {
+    coarse_zooms(sources, w.z)
         .into_iter()
         .flat_map(|za| {
             ancestor_tiles(w, za)
@@ -173,104 +179,138 @@ pub fn dependencies(w: &TileWindow, sources: &[Source]) -> Vec<TileWindow> {
         .collect()
 }
 
-/// Whether any pixel of the tile at zoom `z` has heights from a source at or
-/// finer than `z`, or none, and so is shaded directly.
-pub fn any_direct(native: &[u8], z: u8) -> bool {
-    tile_pixels(native).any(|n| n >= z)
+/// In `Plan::zooms`, a pixel shaded on the tile itself.
+const DIRECT: u8 = u8::MAX;
+
+/// Per ancestor zoom, its tiles by x, y.
+type Pictures = Vec<(u8, HashMap<(u32, u32), Picture>)>;
+
+/// Where each pixel of a tile gets its shading.
+pub struct Plan {
+    /// Per tile pixel, the zoom of the ancestor it is scaled up from, or `DIRECT`.
+    zooms: Vec<u8>,
+    pictures: Pictures,
 }
 
-fn tile_pixels(native: &[u8]) -> impl Iterator<Item = u8> + '_ {
-    (0..TILE * TILE).map(|i| native[(i / TILE + BUFFER) * SIZE + i % TILE + BUFFER])
-}
+impl Plan {
+    /// Plans the tile at `w` from `native`, per buffered window pixel the zoom
+    /// of the source that filled it. Pixels without data take the finest
+    /// coarser zoom, whose ancestor has shading where upsampling left a
+    /// source's edge without heights. Pixels whose ancestors fail are shaded
+    /// directly, pillowed, rather than failing the tile.
+    pub fn new(
+        native: &[u8],
+        w: &TileWindow,
+        sources: &[Source],
+        shading: (&Arc<str>, &Shading),
+        ancestors: &Ancestors,
+    ) -> Self {
+        let coarse = coarse_zooms(sources, w.z);
+        let fill = coarse.last().copied().unwrap_or(DIRECT);
 
-/// Replaces the pixels of the tile at `w` whose heights came from a source
-/// coarser than `w.z` (`native`, per buffered window pixel) with its ancestor's
-/// shading at that source's zoom, scaled up bicubically. A zoom whose
-/// ancestors fail is left as it was, and the first error returned.
-pub fn apply(
-    planes: &mut Planes,
-    native: &[u8],
-    w: &TileWindow,
-    sources: &[Source],
-    shading: (&str, &Shading),
-    ancestors: &Ancestors,
-) -> Result<(), AppError> {
-    let mut zooms: Vec<u8> = tile_pixels(native).filter(|&z| z < w.z).collect();
+        let mut zooms: Vec<u8> = (0..TILE * TILE)
+            .map(
+                |i| match native[(i / TILE + BUFFER) * SIZE + i % TILE + BUFFER] {
+                    u8::MAX => fill,
+                    n if n >= w.z => DIRECT,
+                    n => n,
+                },
+            )
+            .collect();
 
-    zooms.sort_unstable();
-    zooms.dedup();
+        let mut used = [false; 256];
 
-    let mut first_err = None;
+        for &z in &zooms {
+            used[z as usize] = true;
+        }
 
-    for za in zooms {
-        let pictures = match ancestor_tiles(w, za)
-            .into_iter()
-            .map(|t| Ok((t, ancestors.get(sources, shading, (za, t.0, t.1))?)))
-            .collect::<Result<HashMap<_, _>, AppError>>()
-        {
-            Ok(p) => p,
-            Err(e) => {
-                first_err.get_or_insert(e);
+        let mut pictures = Vec::new();
 
-                continue;
-            }
-        };
+        for za in coarse.into_iter().filter(|&za| used[za as usize]) {
+            let got = ancestor_tiles(w, za)
+                .into_iter()
+                .map(|t| Ok((t, ancestors.get(sources, shading, (za, t.0, t.1))?)))
+                .collect::<Result<HashMap<_, _>, AppError>>();
 
-        // The taps, copied out of the ancestors once, one plane per channel.
-        let (x0, y0, x1, y1) = tap_box(w, za);
-        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
-        let side = (TILE as i64) << za;
-        let mut region = vec![vec![0.0f32; rw * rh]; 4];
+            match got {
+                Ok(p) => pictures.push((za, p)),
+                Err(e) => {
+                    eprintln!("hillshade {}/{}/{}: ancestors at z{za}: {e}", w.z, w.x, w.y);
 
-        for ry in 0..rh {
-            let gy = (y0 + ry as i64).clamp(0, side - 1) as usize;
-
-            for rx in 0..rw {
-                let gx = (x0 + rx as i64).rem_euclid(side) as usize;
-                let p = &pictures[&((gx / TILE) as u32, (gy / TILE) as u32)];
-                let v = p[(gy % TILE) * TILE + gx % TILE];
-
-                for (plane, c) in region.iter_mut().zip(v) {
-                    plane[ry * rw + rx] = c as f32 / 65535.0;
+                    for z in zooms.iter_mut().filter(|z| **z == za) {
+                        *z = DIRECT;
+                    }
                 }
             }
         }
 
-        // A row's or column's taps and weights are the same for every pixel on it.
-        let s = (1u64 << (w.z - za)) as f64;
-
-        let taps = |o: u32, r0: i64| -> Vec<(usize, [f64; 4])> {
-            (0..TILE)
-                .map(|i| {
-                    let t = (o as f64 * TILE as f64 + i as f64 + 0.5) / s - 0.5;
-                    let t0 = t.floor();
-
-                    ((t0 as i64 - 1 - r0) as usize, cubic_weights(t - t0))
-                })
-                .collect()
-        };
-
-        let cols = taps(w.x, x0);
-        let rows = taps(w.y, y0);
-
-        for (i, n) in tile_pixels(native).enumerate() {
-            if n != za {
-                continue;
-            }
-
-            let ((ix, wx), (iy, wy)) = (&cols[i % TILE], &rows[i / TILE]);
-            let [r, g, b, a] =
-                [0, 1, 2, 3].map(|c| bicubic(&region[c][iy * rw + ix..], rw, wx, wy));
-
-            // Catmull-Rom overshoots; keep the colour premultiplied.
-            let a = a.clamp(0.0, 1.0);
-
-            planes.a[i] = a;
-            planes.r[i] = r.clamp(0.0, a);
-            planes.g[i] = g.clamp(0.0, a);
-            planes.b[i] = b.clamp(0.0, a);
-        }
+        Self { zooms, pictures }
     }
 
-    first_err.map_or(Ok(()), Err)
+    /// Whether any pixel is shaded on the tile itself.
+    pub fn any_direct(&self) -> bool {
+        self.zooms.contains(&DIRECT)
+    }
+
+    /// Overwrites the scaled-up pixels of the tile at `w`, scaled up bicubically.
+    pub fn paint(&self, planes: &mut Planes, w: &TileWindow) {
+        for (za, pictures) in &self.pictures {
+            let za = *za;
+
+            // The taps, copied out of the ancestors once, one plane per channel.
+            let (x0, y0, x1, y1) = tap_box(w, za);
+            let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+            let side = (TILE as i64) << za;
+            let mut region = vec![vec![0.0f32; rw * rh]; 4];
+
+            for ry in 0..rh {
+                let gy = (y0 + ry as i64).clamp(0, side - 1) as usize;
+
+                for rx in 0..rw {
+                    let gx = (x0 + rx as i64).rem_euclid(side) as usize;
+                    let p = &pictures[&((gx / TILE) as u32, (gy / TILE) as u32)];
+                    let v = p[(gy % TILE) * TILE + gx % TILE];
+
+                    for (plane, c) in region.iter_mut().zip(v) {
+                        plane[ry * rw + rx] = c as f32 / 65535.0;
+                    }
+                }
+            }
+
+            // A row's or column's taps and weights are the same for every pixel on it.
+            let s = (1u64 << (w.z - za)) as f64;
+
+            let taps = |o: u32, r0: i64| -> Vec<(usize, [f64; 4])> {
+                (0..TILE)
+                    .map(|i| {
+                        let t = (o as f64 * TILE as f64 + i as f64 + 0.5) / s - 0.5;
+                        let t0 = t.floor();
+
+                        ((t0 as i64 - 1 - r0) as usize, cubic_weights(t - t0))
+                    })
+                    .collect()
+            };
+
+            let cols = taps(w.x, x0);
+            let rows = taps(w.y, y0);
+
+            for (i, &n) in self.zooms.iter().enumerate() {
+                if n != za {
+                    continue;
+                }
+
+                let ((ix, wx), (iy, wy)) = (&cols[i % TILE], &rows[i / TILE]);
+                let [r, g, b, a] =
+                    [0, 1, 2, 3].map(|c| bicubic(&region[c][iy * rw + ix..], rw, wx, wy));
+
+                // Catmull-Rom overshoots; keep the colour premultiplied.
+                let a = a.clamp(0.0, 1.0);
+
+                planes.a[i] = a;
+                planes.r[i] = r.clamp(0.0, a);
+                planes.g[i] = g.clamp(0.0, a);
+                planes.b[i] = b.clamp(0.0, a);
+            }
+        }
+    }
 }
