@@ -1,0 +1,22 @@
+[package]
+name = "terrain-tiles"
+version = "0.1.0"
+edition = "2024"
+description = "Seamless elevation and hillshading tiles from per-country Web-Mercator DEMs"
+
+[dependencies]
+axum = "0.8.8"
+clap = { version = "4.5.59", features = ["derive"] }
+# Released 0.19 does not compile against GDAL 3.13; same pin as dem-pyramid.
+gdal = { git = "https://github.com/georust/gdal", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf" }
+httpdate = "1.0.3"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
+jpeg-encoder = { version = "0.6.1", features = ["simd"] }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.17"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+webp = "0.3.1"
+zstd = "0.13.3"
+
+[profile.release]
+debug = 1

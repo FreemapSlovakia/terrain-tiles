@@ -1,0 +1,36 @@
+# systemd unit for terrain-tiles on fm6.
+#
+# Install:
+#   cp deploy/terrain-tiles.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now terrain-tiles
+
+[Unit]
+Description=Freemap terrain tiles (elevation and server-rendered shading)
+After=network.target
+RequiresMountsFor=/fm/storage2
+
+[Service]
+Type=simple
+User=martin
+WorkingDirectory=/fm/storage2/terrain
+# Highest priority first; keys are what X-Attribution names as s<key>.
+ExecStart=/fm/storage2/terrain/build/target/release/terrain-tiles \
+    --listen 127.0.0.1:3040 \
+    --cache-mb 2048 \
+    --max-age 86400 \
+    --source sk=sk.tif \
+    --source cz=cz.tif \
+    --source ch=ch.tif \
+    --source at=at.tif
+
+# Everything else on fm6 matters more: past these, this service is throttled
+# and then killed alone rather than the kernel picking a victim.
+MemoryHigh=8G
+MemoryMax=12G
+Nice=5
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
