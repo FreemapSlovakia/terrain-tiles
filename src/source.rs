@@ -276,8 +276,8 @@ impl Source {
     }
 }
 
-// Catmull-Rom, as GDAL's cubic.
-fn cubic_weights(t: f64) -> [f64; 4] {
+/// Catmull-Rom, as GDAL's cubic.
+pub fn cubic_weights(t: f64) -> [f64; 4] {
     let t2 = t * t;
     let t3 = t2 * t;
 
@@ -290,7 +290,7 @@ fn cubic_weights(t: f64) -> [f64; 4] {
 }
 
 /// The 4×4 taps from the top-left of `src`, rows `stride` apart; NaN if any tap is.
-fn bicubic(src: &[f32], stride: usize, wx: &[f64; 4], wy: &[f64; 4]) -> f32 {
+pub fn bicubic(src: &[f32], stride: usize, wx: &[f64; 4], wy: &[f64; 4]) -> f32 {
     let mut sum = 0.0;
 
     for (j, wyj) in wy.iter().enumerate() {

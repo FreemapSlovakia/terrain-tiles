@@ -20,6 +20,7 @@ use terrain_tiles::{
     encode::{self, Format},
     error::AppError,
     mosaic,
+    overzoom::{self, Ancestors},
     shading::{self, Shading},
     source::Source,
     tile::TileWindow,
@@ -63,6 +64,11 @@ struct Args {
     /// time, which a 304 answers without reading or rendering anything.
     #[arg(long, default_value_t = 0)]
     max_age: u64,
+
+    /// Shaded tiles kept at a coarse source's native zoom, for the deeper
+    /// tiles scaled up from them; 512 KiB each.
+    #[arg(long, default_value_t = 1024)]
+    ancestors: usize,
 }
 
 const X_ATTRIBUTION: HeaderName = HeaderName::from_static("x-attribution");
@@ -76,6 +82,7 @@ struct AppState {
     /// invalidates every tile.
     code_modified: SystemTime,
     cache_control: HeaderValue,
+    ancestors: Ancestors,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,6 +128,7 @@ async fn serve(args: Args, workers: usize) -> Result<(), Box<dyn std::error::Err
         } else {
             format!("public, max-age={}", args.max_age)
         })?,
+        ancestors: Ancestors::new(args.ancestors),
     });
 
     let evict_after = Duration::from_secs(args.evict_after);
@@ -209,13 +217,14 @@ async fn cors(mut response: Response) -> Response {
     response
 }
 
-/// When the tile last changed: the newest of the sources that may cover it and
-/// the binary. Decided from the footprints, so it costs no read.
-fn tile_modified(state: &AppState, w: &TileWindow) -> SystemTime {
+/// When a tile last changed: the newest of the binary and the sources that may
+/// cover any of `windows`, the tile's own and those it depends on. Decided from
+/// the footprints, so it costs no read.
+fn tile_modified(state: &AppState, windows: &[TileWindow]) -> SystemTime {
     state
         .sources
         .iter()
-        .filter(|s| s.covers(w))
+        .filter(|s| windows.iter().any(|w| s.covers(w)))
         .map(|s| s.modified)
         .fold(state.code_modified, SystemTime::max)
 }
@@ -242,10 +251,15 @@ async fn serve_tile(
     state: Arc<AppState>,
     (z, x, y): (u8, u32, u32),
     request: &HeaderMap,
+    dependencies: impl FnOnce(&TileWindow, &[Source]) -> Vec<TileWindow>,
     work: impl FnOnce(&[Source], TileWindow) -> Result<Tile, AppError> + Send + 'static,
 ) -> Result<Response, AppError> {
     let w = TileWindow::new(z, x, y, state.max_zoom).ok_or(AppError::NotFound)?;
-    let modified = tile_modified(&state, &w);
+    let mut windows = dependencies(&w, &state.sources);
+
+    windows.push(w);
+
+    let modified = tile_modified(&state, &windows);
 
     let mut headers = HeaderMap::new();
 
@@ -298,15 +312,21 @@ async fn elevation(
     Path(zxy): Path<(u8, u32, u32)>,
     request: HeaderMap,
 ) -> Result<Response, AppError> {
-    serve_tile(state, zxy, &request, |sources, w| {
-        let m = mosaic::read(sources, &w)?.ok_or(AppError::NotFound)?;
+    serve_tile(
+        state,
+        zxy,
+        &request,
+        |_, _| Vec::new(),
+        |sources, w| {
+            let m = mosaic::read(sources, &w)?.ok_or(AppError::NotFound)?;
 
-        Ok(Tile {
-            body: elevation::encode(&m.heights, w.z)?,
-            content_type: "application/octet-stream",
-            credited: m.credited,
-        })
-    })
+            Ok(Tile {
+                body: elevation::encode(&m.heights, w.z)?,
+                content_type: "application/octet-stream",
+                credited: m.credited,
+            })
+        },
+    )
     .await
 }
 
@@ -324,22 +344,65 @@ async fn hillshade(
     request: HeaderMap,
 ) -> Result<Response, AppError> {
     let shading = Shading::parse(q.shading.as_deref().unwrap_or(shading::DEFAULT))?;
+    // Spellings of the same shading share cached ancestors.
+    let key = format!("{shading:?}");
+    let st = state.clone();
 
-    serve_tile(state, zxy, &request, move |sources, w| {
-        // Outside all coverage the tile is the background, not a 404, so a
-        // client can keep its error tile for real failures.
-        let (planes, credited) = match mosaic::read(sources, &w)? {
-            Some(m) => (shading.render(&m.heights, &w), m.credited),
-            None => (shading.background_planes(), Vec::new()),
-        };
+    serve_tile(
+        state,
+        zxy,
+        &request,
+        overzoom::dependencies,
+        move |sources, w| {
+            // Outside all coverage the tile is the background, not a 404, so a
+            // client can keep its error tile for real failures.
+            let (planes, credited) = match mosaic::read(sources, &w)? {
+                Some(m) => {
+                    // Where every pixel is scaled up from ancestors, nothing is shaded here.
+                    let direct = overzoom::any_direct(&m.native, w.z);
 
-        let (body, content_type) = encode::encode(&planes, q.format, shading.is_gray())?;
+                    let mut planes = if direct {
+                        shading.render(&m.heights, &w)
+                    } else {
+                        shading.background_planes()
+                    };
 
-        Ok(Tile {
-            body,
-            content_type,
-            credited,
-        })
-    })
+                    let apply = |planes: &mut _| {
+                        overzoom::apply(
+                            planes,
+                            &m.native,
+                            &w,
+                            sources,
+                            (&key, &shading),
+                            &st.ancestors,
+                        )
+                    };
+
+                    // Pixels whose ancestors fail keep their own, pillowed shading
+                    // rather than failing the tile.
+                    if let Err(e) = apply(&mut planes) {
+                        eprintln!("hillshade {}/{}/{}: ancestors: {e}", w.z, w.x, w.y);
+
+                        if !direct {
+                            planes = shading.render(&m.heights, &w);
+
+                            let _ = apply(&mut planes);
+                        }
+                    }
+
+                    (planes, m.credited)
+                }
+                None => (shading.background_planes(), Vec::new()),
+            };
+
+            let (body, content_type) = encode::encode(&planes, q.format, shading.is_gray())?;
+
+            Ok(Tile {
+                body,
+                content_type,
+                credited,
+            })
+        },
+    )
     .await
 }

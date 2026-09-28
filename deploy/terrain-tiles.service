@@ -21,7 +21,8 @@ ExecStart=/fm/storage2/terrain/build/target/release/terrain-tiles \
     --source sk=sk.tif \
     --source cz=cz.tif \
     --source ch=ch.tif \
-    --source at=at.tif
+    --source at=at.tif \
+    --source gedtm30=gedtm30.tif
 
 # Everything else on fm6 matters more: past these, this service is throttled
 # and then killed alone rather than the kernel picking a victim.

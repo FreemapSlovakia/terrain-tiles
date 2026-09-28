@@ -3,6 +3,7 @@ pub mod encode;
 pub mod error;
 pub mod footprint;
 pub mod mosaic;
+pub mod overzoom;
 pub mod pool;
 pub mod shading;
 pub mod source;

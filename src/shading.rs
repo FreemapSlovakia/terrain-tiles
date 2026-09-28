@@ -12,7 +12,7 @@ type Rgba = [f32; 4];
 
 const N: usize = TILE * TILE;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Method {
     HillshadeIgor,
     HillshadeClassic,
@@ -22,6 +22,7 @@ enum Method {
     Aspect,
 }
 
+#[derive(Debug)]
 struct Component {
     method: Method,
     contrast: f32,
@@ -34,6 +35,7 @@ struct Component {
     aspect_ref: f32,
 }
 
+#[derive(Debug)]
 pub struct Shading {
     background: Rgba,
     components: Vec<Component>,
