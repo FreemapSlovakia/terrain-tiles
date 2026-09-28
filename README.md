@@ -26,16 +26,32 @@ from the national CRS belongs in the step before, where it resamples once.
 ## Running
 
 ```sh
-terrain-tiles --source sk=/data/sk.tif --source cz=/data/cz.tif
+terrain-tiles --elevation-sources /data/elevation-sources \
+  --source sk=/data/sk.tif --source cz=/data/cz.tif
 ```
 
 Sources are listed highest priority first. A tile takes each pixel from the
 first source that has data there. `X-Attribution` names the sources that
 filled a pixel of the tile as `s<key>`.
 
+A key is the `name` of the
+[elevation-sources](https://github.com/FreemapSlovakia/elevation-sources)
+datasets it was built from, and is credited with their attributions; the
+server refuses to start for a key no dataset names.
+
 ## Routes
 
-Both serve the tile plus a 2 px buffer's worth of data from its neighbours.
+### `GET /licenses`
+
+`{"shading:<key>": [{"title": …, "url": …}], …}` for every source, as the
+outdoor renderer's `/licenses` keys its own, so a client resolves
+`X-Attribution: s<key>` through either the same way. Revalidated on every use
+(`no-cache`, `ETag`).
+
+### Tiles
+
+Both tile routes serve the tile plus a 2 px buffer's worth of data from its
+neighbours.
 
 ### `GET /elevation/{z}/{x}/{y}`
 

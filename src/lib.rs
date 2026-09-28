@@ -2,6 +2,7 @@ pub mod elevation;
 pub mod encode;
 pub mod error;
 pub mod footprint;
+pub mod licenses;
 pub mod mosaic;
 pub mod overzoom;
 pub mod pool;

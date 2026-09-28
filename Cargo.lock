@@ -801,6 +801,7 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "webp",

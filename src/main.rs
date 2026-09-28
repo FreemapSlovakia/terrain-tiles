@@ -19,6 +19,7 @@ use terrain_tiles::{
     elevation,
     encode::{self, Format},
     error::AppError,
+    licenses::Licenses,
     mosaic,
     overzoom::{self, Ancestors, Plan},
     shading::{self, Shading},
@@ -37,6 +38,11 @@ struct Args {
     /// `X-Attribution` names as `s<KEY>`.
     #[arg(long = "source", required = true, value_parser = Source::parse_arg)]
     sources: Vec<(String, PathBuf)>,
+
+    /// Checkout of elevation-sources: a key is credited with the attributions
+    /// of the datasets it names, for `GET /licenses`.
+    #[arg(long)]
+    elevation_sources: PathBuf,
 
     /// Highest zoom served; default the finest source's. Above it the client
     /// should overzoom: shading upsampled heights only sharpens noise.
@@ -83,6 +89,7 @@ struct AppState {
     code_modified: SystemTime,
     cache_control: HeaderValue,
     ancestors: Ancestors,
+    licenses: Licenses,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -112,6 +119,9 @@ async fn serve(args: Args, workers: usize) -> Result<(), Box<dyn std::error::Err
         eprintln!("source {} at z{}", s.key, s.zoom);
     }
 
+    let keys: Vec<&str> = sources.iter().map(|s| s.key.as_str()).collect();
+    let licenses = Licenses::load(&args.elevation_sources, &keys)?;
+
     let max_zoom = args
         .max_zoom
         .unwrap_or_else(|| sources.iter().map(|s| s.zoom).max().unwrap_or(0));
@@ -129,6 +139,7 @@ async fn serve(args: Args, workers: usize) -> Result<(), Box<dyn std::error::Err
             format!("public, max-age={}", args.max_age)
         })?,
         ancestors: Ancestors::new(args.ancestors),
+        licenses,
     });
 
     let evict_after = Duration::from_secs(args.evict_after);
@@ -142,6 +153,7 @@ async fn serve(args: Args, workers: usize) -> Result<(), Box<dyn std::error::Err
     let app = Router::new()
         .route("/elevation/{z}/{x}/{y}", get(elevation))
         .route("/hillshade/{z}/{x}/{y}", get(hillshade))
+        .route("/licenses", get(get_licenses))
         .layer(middleware::map_response(cors))
         .with_state(state);
 
@@ -305,6 +317,44 @@ async fn serve_tile(
     }
 
     Ok((headers, tile.body).into_response())
+}
+
+/// The sources' credits. Revalidated on every use, so a source added since is
+/// never resolved from a stale copy; an unchanged one costs a 304.
+async fn get_licenses(State(state): State<Arc<AppState>>, request: HeaderMap) -> Response {
+    let l = &state.licenses;
+
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, no-cache"),
+    );
+
+    if let Ok(v) = HeaderValue::from_str(&l.etag) {
+        headers.insert(header::ETAG, v);
+    }
+
+    // Weak comparison: a proxy that compresses the body marks the ETag weak.
+    let matches = request
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .map(|t| t.trim())
+                .any(|t| t == "*" || t.trim_start_matches("W/") == l.etag)
+        });
+
+    if matches {
+        return (StatusCode::NOT_MODIFIED, headers).into_response();
+    }
+
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    (headers, l.body.clone()).into_response()
 }
 
 async fn elevation(
