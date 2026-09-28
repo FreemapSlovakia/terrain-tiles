@@ -49,8 +49,9 @@ pub struct Planes {
     pub a: Vec<f32>,
 }
 
-/// The client's default: classic hillshade from 315°, 45° high, white.
-pub const DEFAULT: &str = "00000000!hillshade-classic_315.0_45.0_1.0_ffffffff";
+/// The client's default, as `gdaldem hillshade` draws: classic hillshade from
+/// 315°, 45° high, white over opaque black.
+pub const DEFAULT: &str = "000000ff!hillshade-classic_315.0_45.0_1.0_ffffffff";
 
 fn color(s: &str) -> Result<Rgba, AppError> {
     let bad = || AppError::BadRequest(format!("bad color {s}"));
