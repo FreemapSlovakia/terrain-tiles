@@ -42,7 +42,10 @@ final.
 | `cz` | z18 | DMR 5G points, gridded at 1 m in Krovák, then warped |
 | `at` | z18 | ALS DTM, 1 m raster (EPSG:3035) |
 | `ch` | z18 | swissALTI3D, 0.5 m (EPSG:2056) |
+| `si` | z17 | DMR, 1 m raster (EPSG:3794) |
+| `hr` | z17 | DMR, 1 m raster (EPSG:3765) |
 | `pl` | z17 | NMT, 1 m raster (EPSG:2180) |
+| `it` | z15 | HR-DTM, 5 m raster (EPSG:6875); its pixel-doubled 10 m patches rebuilt and its 10 m ripple removed first |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
@@ -59,7 +62,10 @@ filled a pixel of the tile as `s<key>`.
 A key is the `name` of the
 [elevation-sources](https://github.com/FreemapSlovakia/elevation-sources)
 datasets it was built from, and is credited with their attributions; the
-server refuses to start for a key no dataset names.
+server refuses to start for a key no dataset names. A source built from a
+single dataset may instead be keyed by its directory without the number
+(`245-de_by` → `de_by`), which is how a German state is credited alone when
+all of them are named `de`.
 
 ## Routes
 

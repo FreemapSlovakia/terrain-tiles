@@ -1,7 +1,8 @@
 //! What each source must be credited as, read from the
 //! [elevation-sources](https://github.com/FreemapSlovakia/elevation-sources)
 //! checkout the elevation API is credited from: a source key is the `name` of
-//! the datasets it was built from.
+//! the datasets it was built from, or one dataset's directory without its
+//! number (`245-de_by` → `de_by`).
 
 use crate::error::AppError;
 use axum::body::Bytes;
@@ -40,7 +41,7 @@ impl Licenses {
     /// licence.
     pub fn load(dir: &Path, keys: &[&str]) -> Result<Self, AppError> {
         let io = |e: std::io::Error| AppError::Config(format!("{}: {e}", dir.display()));
-        let mut by_name: BTreeMap<String, Vec<License>> = BTreeMap::new();
+        let mut by_key: BTreeMap<String, Vec<License>> = BTreeMap::new();
 
         // Sorted, so a name's credits follow the checkout's numbered order.
         let mut paths = std::fs::read_dir(dir)
@@ -65,17 +66,34 @@ impl Licenses {
             let source: SourceJson = serde_json::from_str(&text)
                 .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
 
-            let credits = by_name.entry(source.name).or_default();
-
-            for a in source.attributions {
-                let license = License {
+            let licenses: Vec<License> = source
+                .attributions
+                .into_iter()
+                .map(|a| License {
                     title: a.name,
                     url: a.url,
-                };
+                })
+                .collect();
 
-                // Datasets sharing a name often share a credit, too.
-                if !credits.contains(&license) {
-                    credits.push(license);
+            // `245-de_by` also answers as `de_by`: every German state is
+            // named `de`, and a source built from one state credits it alone.
+            let dataset = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|n| n.trim_start_matches(|c: char| c.is_ascii_digit()))
+                .and_then(|n| n.strip_prefix('-'))
+                .filter(|n| !n.is_empty() && *n != source.name)
+                .map(str::to_owned);
+
+            for key in std::iter::once(source.name).chain(dataset) {
+                let credits = by_key.entry(key).or_default();
+
+                for license in &licenses {
+                    // Datasets sharing a name often share a credit, too.
+                    if !credits.contains(license) {
+                        credits.push(license.clone());
+                    }
                 }
             }
         }
@@ -83,13 +101,13 @@ impl Licenses {
         let mut dict = BTreeMap::new();
 
         for key in keys {
-            match by_name.get(*key) {
+            match by_key.get(*key) {
                 Some(credits) if !credits.is_empty() => {
                     dict.insert(format!("shading:{key}"), credits.clone());
                 }
                 _ => {
                     return Err(AppError::Config(format!(
-                        "no dataset in {} is named {key}, so nothing credits it",
+                        "no dataset in {} is named or keyed {key}, so nothing credits it",
                         dir.display()
                     )));
                 }
