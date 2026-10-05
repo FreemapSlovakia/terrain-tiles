@@ -43,6 +43,7 @@ final.
 | `at` | z18 | ALS DTM, 1 m raster (EPSG:3035) |
 | `ch` | z18 | swissALTI3D, 0.5 m (EPSG:2056) |
 | `de_<state>` | z17 | DGM1 of each German state, 1 m rasters (EPSG:25832, or 25833 for Saxony, Mecklenburg-Vorpommern and Brandenburg), one source per state |
+| `nl`, `be_vlg`, `be_wal`, `lu` | z17 | AHN5 DTM, DHMV II, SPW MNT 2021–22 and the 2024 LiDAR MNT, 1 m rasters (EPSG:28992, 3812, 3812, 2169) |
 | `si` | z17 | DMR, 1 m raster (EPSG:3794) |
 | `hr` | z17 | DMR, 1 m raster (EPSG:3765) |
 | `pl` | z17 | NMT, 1 m raster (EPSG:2180) |
