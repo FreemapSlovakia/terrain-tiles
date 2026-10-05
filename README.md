@@ -39,13 +39,15 @@ final.
 | Key | Zoom | Built from |
 | --- | --- | --- |
 | `sk` | z18 | DMR 5.0, 1 m raster in Krovák (JTSK03) |
-| `cz` | z18 | DMR 5G points, gridded at 1 m in Krovák, then warped |
+| `cz` | z18 | DMR 5G points by natural neighbours straight onto the z18 grid, gaps membrane-filled, clipped to the border + 500 m |
 | `at` | z18 | ALS DTM, 1 m raster (EPSG:3035) |
 | `ch` | z18 | swissALTI3D, 0.5 m (EPSG:2056) |
+| `de_<state>` | z17 | DGM1 of each German state, 1 m rasters (EPSG:25832, or 25833 for Saxony, Mecklenburg-Vorpommern and Brandenburg), one source per state |
 | `si` | z17 | DMR, 1 m raster (EPSG:3794) |
 | `hr` | z17 | DMR, 1 m raster (EPSG:3765) |
 | `pl` | z17 | NMT, 1 m raster (EPSG:2180) |
 | `it` | z15 | HR-DTM, 5 m raster (EPSG:6875); its pixel-doubled 10 m patches rebuilt and its 10 m ripple removed first |
+| `fr` | z15 | RGE ALTI, 1 m raster (EPSG:2154), mainland; in the mountains it is ~5 m data on a 1 m grid |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
