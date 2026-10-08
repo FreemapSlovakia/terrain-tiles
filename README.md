@@ -50,6 +50,7 @@ final.
 | `it` | z15 | HR-DTM, 5 m raster (EPSG:6875); its pixel-doubled 10 m patches rebuilt and its 10 m ripple removed first |
 | `es` | z16 | MDT02, 2 m rasters, one source per UTM zone (EPSG:25829, 25830, 25831); the sheets lie on differing grids, so each is warped directly rather than through a mosaic |
 | `fr` | z15 | RGE ALTI, 1 m raster (EPSG:2154), mainland; in the mountains it is ~5 m data on a 1 m grid |
+| `en`, `wls` | z17 | LIDAR Composite DTM (England) and the Welsh Government LiDAR DTM, 1 m rasters (EPSG:27700, OSTN15 shift) |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
