@@ -13,14 +13,14 @@ RequiresMountsFor=/fm/storage1 /fm/storage2
 Type=simple
 User=martin
 WorkingDirectory=/fm/storage2/terrain
-# Highest priority first; keys are what X-Attribution names as s<key>.
+# Highest priority first; keys are what X-Attribution names as s<key>. cz comes
+# after its neighbours: its fill reaches 500 m past the border, over their data.
 ExecStart=/fm/storage2/terrain/build/target/release/terrain-tiles \
     --listen 127.0.0.1:3040 \
     --cache-mb 2048 \
     --max-age 86400 \
     --elevation-sources /fm/storage1/backend.freemap.sk-data/elevation-sources \
     --source sk=sk.tif \
-    --source cz=cz.tif \
     --source ch=ch.tif \
     --source at=at.tif \
     --source de_by=de_by.tif \
@@ -45,7 +45,11 @@ ExecStart=/fm/storage2/terrain/build/target/release/terrain-tiles \
     --source si=si.tif \
     --source hr=hr.tif \
     --source pl=pl.tif \
+    --source cz=cz.tif \
     --source it=it.tif \
+    --source es=/fm/storage1/terrain/es_30.tif \
+    --source es=/fm/storage1/terrain/es_29.tif \
+    --source es=/fm/storage1/terrain/es_31.tif \
     --source fr=fr.tif \
     --source gedtm30=gedtm30.tif
 
