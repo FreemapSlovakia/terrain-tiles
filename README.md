@@ -25,6 +25,8 @@ from the national CRS belongs in the step before, where it resamples once.
 ### Which zoom
 
 A z17 pixel is 0.73–0.83 m on the ground at 46–52° N, a z18 one half that.
+A pixel shrinks on the ground with the cosine of latitude, so the rules below
+are for those latitudes: at 58–71° N a z16 pixel is already 0.8–1.25 m.
 
 - Rendered from lidar points, or finer than 1 m: z18.
 - A 1 m raster: z17 by default. z18 is a little sharper, since 1 m does not
@@ -51,6 +53,7 @@ final.
 | `es` | z16 | MDT02, 2 m rasters, one source per UTM zone (EPSG:25829, 25830, 25831); the sheets lie on differing grids, so each is warped directly rather than through a mosaic |
 | `fr` | z15 | RGE ALTI, 1 m raster (EPSG:2154), mainland; in the mountains it is ~5 m data on a 1 m grid |
 | `en`, `wls` | z17 | LIDAR Composite DTM (England) and the Welsh Government LiDAR DTM, 1 m rasters (EPSG:27700, OSTN15 shift) |
+| `no` | z16 | Kartverket DTM, 1 m raster (EPSG:25833) |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
