@@ -54,6 +54,7 @@ final.
 | `fr` | z15 | RGE ALTI, 1 m raster (EPSG:2154), mainland; in the mountains it is ~5 m data on a 1 m grid |
 | `en`, `wls` | z17 | LIDAR Composite DTM (England) and the Welsh Government LiDAR DTM, 1 m rasters (EPSG:27700, OSTN15 shift) |
 | `no` | z16 | Kartverket DTM, 1 m raster (EPSG:25833) |
+| `fi` | z16 | NLS elevation model, 2 m raster (EPSG:3067) |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
