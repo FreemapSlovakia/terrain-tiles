@@ -55,6 +55,7 @@ ExecStart=/fm/storage2/terrain/build/target/release/terrain-tiles \
     --source wls=/fm/storage1/terrain/wls.tif \
     --source no=/fm/storage1/terrain/no.tif \
     --source fi=/fm/storage1/terrain/fi.tif \
+    --source dk=/fm/storage1/terrain/dk.tif \
     --source gedtm30=gedtm30.tif
 
 # Everything else on fm6 matters more: past these, this service is throttled

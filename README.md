@@ -55,6 +55,7 @@ final.
 | `en`, `wls` | z17 | LIDAR Composite DTM (England) and the Welsh Government LiDAR DTM, 1 m rasters (EPSG:27700, OSTN15 shift) |
 | `no` | z16 | Kartverket DTM, 1 m raster (EPSG:25833) |
 | `fi` | z16 | NLS elevation model, 2 m raster (EPSG:3067) |
+| `dk` | z17 | Danmarks Højdemodel terrain, 1 m raster (EPSG:25832) |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
