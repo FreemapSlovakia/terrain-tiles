@@ -5,22 +5,18 @@ per-country DEMs that are already in Web Mercator.
 
 ## Sources
 
-One Cloud-Optimized GeoTIFF per country or region:
+One tiled GeoTIFF per country or region:
 
 - EPSG:3857, on the XYZ pixel grid of its zoom (see below)
 - Int32 heights in 2 mm steps (band scale `0.002`), nodata `-2147483648`
 - ZSTD with the integer predictor
-- 256 px blocks and overviews aligned to XYZ tiles, so a block is a tile
+- 256 px blocks and internal average overviews down to z8, aligned to XYZ
+  tiles, so a block is a tile
 
-```sh
-gdal_translate -of COG heights_i32.tif cz.tif \
-  -co TILING_SCHEME=GoogleMapsCompatible -co ZOOM_LEVEL=18 -co BLOCKSIZE=256 \
-  -co ALIGNED_LEVELS=9 -co RESAMPLING=NEAREST -co OVERVIEW_RESAMPLING=AVERAGE \
-  -co COMPRESS=ZSTD -co LEVEL=19 -co PREDICTOR=YES -co SPARSE_OK=TRUE -co BIGTIFF=YES
-```
-
-`RESAMPLING=NEAREST` assumes the input is already on the z18 grid; the warp
-from the national CRS belongs in the step before, where it resamples once.
+[`scripts/build-source.sh`](scripts/build-source.sh) builds one from a
+national DTM: it warps once, cubic, straight onto the grid, then adds the
+overviews. The files are not COGs — the overviews and the main IFD follow the
+data — which costs nothing read from local disk.
 
 ### Which zoom
 
