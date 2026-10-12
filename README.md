@@ -50,7 +50,7 @@ final.
 | `hr` | z17 | DMR, 1 m raster (EPSG:3765) |
 | `pl` | z17 | NMT, 1 m raster (EPSG:2180) |
 | `it` | z15 | HR-DTM, 5 m raster (EPSG:6875); its pixel-doubled 10 m patches rebuilt and its 10 m ripple removed first |
-| `es` | z16 | MDT02, 2 m rasters, one source per UTM zone (EPSG:25829, 25830, 25831); the sheets lie on differing grids, so each is warped directly rather than through a mosaic |
+| `es_29`, `es_30`, `es_31` | z16 | MDT02, 2 m rasters, one source per UTM zone (EPSG:25829, 25830, 25831); the sheets lie on differing grids, so each is warped directly rather than through a mosaic |
 | `fr` | z15 | RGE ALTI, 1 m raster (EPSG:2154), mainland; in the mountains it is ~5 m data on a 1 m grid |
 | `en`, `wls` | z17 | LIDAR Composite DTM (England) and the Welsh Government LiDAR DTM, 1 m rasters (EPSG:27700, OSTN15 shift) |
 | `no` | z16 | Kartverket DTM, 1 m raster (EPSG:25833) |
@@ -62,21 +62,19 @@ final.
 ## Running
 
 ```sh
-terrain-tiles --elevation-sources /data/elevation-sources \
-  --source sk=/data/sk.tif --source cz=/data/cz.tif
+terrain-tiles --elevation-sources /fm/storage1/backend.freemap.sk-data/elevation-sources
 ```
 
-Sources are listed highest priority first. A tile takes each pixel from the
-first source that has data there. `X-Attribution` names the sources that
-filled a pixel of the tile as `s<key>`.
-
-A key is the `name` of the
+The sources are the
 [elevation-sources](https://github.com/FreemapSlovakia/elevation-sources)
-datasets it was built from, and is credited with their attributions; the
-server refuses to start for a key no dataset names. A source built from a
-single dataset may instead be keyed by its directory without the number
-(`245-de_by` → `de_by`), which is how a German state is credited alone when
-all of them are named `de`.
+datasets that link a `mercator.tif`, ranked by their directory number, lowest
+first. A tile takes each pixel from the first source that has data there.
+Adding, removing or reordering a source is a change there, then a restart.
+
+A source is keyed by its directory name without the number, `-` read as `_`
+(`245-de_by` → `de_by`, `090-es-29` → `es_29`), and credited with its
+`source.json` attributions. `X-Attribution` names the sources that filled a
+pixel of the tile as `s<key>`.
 
 ## Routes
 

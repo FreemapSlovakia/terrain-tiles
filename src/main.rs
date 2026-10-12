@@ -19,7 +19,7 @@ use terrain_tiles::{
     elevation,
     encode::{self, Format},
     error::AppError,
-    licenses::Licenses,
+    licenses::{Licenses, Registry},
     mosaic,
     overzoom::{self, Ancestors, Plan},
     shading::{self, Shading},
@@ -34,13 +34,8 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:3040")]
     listen: SocketAddr,
 
-    /// A source as KEY=PATH; repeat it, highest priority first. KEY is what
-    /// `X-Attribution` names as `s<KEY>`.
-    #[arg(long = "source", required = true, value_parser = Source::parse_arg)]
-    sources: Vec<(String, PathBuf)>,
-
-    /// Checkout of elevation-sources: a key is credited with the attributions
-    /// of the datasets it names, for `GET /licenses`.
+    /// Checkout of elevation-sources: every dataset linking a `mercator.tif`
+    /// is a source, in directory order, credited from its `source.json`.
     #[arg(long)]
     elevation_sources: PathBuf,
 
@@ -109,8 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn serve(args: Args, workers: usize) -> Result<(), Box<dyn std::error::Error>> {
     gdal::config::set_config_option("GDAL_CACHEMAX", &args.cache_mb.to_string())?;
 
-    let sources = args
-        .sources
+    let Registry { sources, licenses } = Registry::load(&args.elevation_sources)?;
+
+    let sources = sources
         .into_iter()
         .map(|(key, path)| Source::open(key, path, args.handles))
         .collect::<Result<Vec<_>, _>>()?;
@@ -118,9 +114,6 @@ async fn serve(args: Args, workers: usize) -> Result<(), Box<dyn std::error::Err
     for s in &sources {
         eprintln!("source {} at z{}", s.key, s.zoom);
     }
-
-    let keys: Vec<&str> = sources.iter().map(|s| s.key.as_str()).collect();
-    let licenses = Licenses::load(&args.elevation_sources, &keys)?;
 
     let max_zoom = args
         .max_zoom

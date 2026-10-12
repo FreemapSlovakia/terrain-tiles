@@ -1,17 +1,20 @@
-//! What each source must be credited as, read from the
+//! The sources and their credits, read from the
 //! [elevation-sources](https://github.com/FreemapSlovakia/elevation-sources)
-//! checkout the elevation API is credited from: a source key is the `name` of
-//! the datasets it was built from, or one dataset's directory without its
-//! number (`245-de_by` → `de_by`).
+//! checkout: every dataset directory that links a `mercator.tif` is a source,
+//! ranked by its directory number and keyed by the rest of the name with `-`
+//! as `_` (`090-es-29` → `es_29`), as `dem-pyramid` keys it.
 
 use crate::error::AppError;
 use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io::ErrorKind, path::Path};
+use std::{
+    collections::BTreeMap,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 #[derive(Deserialize)]
 struct SourceJson {
-    name: String,
     attributions: Vec<Attribution>,
 }
 
@@ -29,6 +32,12 @@ struct License {
     url: Option<String>,
 }
 
+pub struct Registry {
+    /// Key and raster of each source, highest precedence first.
+    pub sources: Vec<(String, PathBuf)>,
+    pub licenses: Licenses,
+}
+
 /// `GET /licenses`: `shading:<key>` to the source's credits, the way the
 /// outdoor renderer keys its own, so `X-Attribution: s<key>` resolves by it.
 pub struct Licenses {
@@ -36,37 +45,44 @@ pub struct Licenses {
     pub etag: String,
 }
 
-impl Licenses {
-    /// Fails for a key no dataset names: serving uncredited data breaches its
-    /// licence.
-    pub fn load(dir: &Path, keys: &[&str]) -> Result<Self, AppError> {
-        let io = |e: std::io::Error| AppError::Config(format!("{}: {e}", dir.display()));
-        let mut by_key: BTreeMap<String, Vec<License>> = BTreeMap::new();
+impl Registry {
+    /// Fails for a source without credits: serving uncredited data breaches
+    /// its licence.
+    pub fn load(dir: &Path) -> Result<Self, AppError> {
+        let config = |path: &Path, e: &dyn std::fmt::Display| AppError::Config(format!("{}: {e}", path.display()));
 
-        // Sorted, so a name's credits follow the checkout's numbered order.
-        let mut paths = std::fs::read_dir(dir)
-            .map_err(io)?
-            .map(|e| Ok(e?.path().join("source.json")))
-            .collect::<Result<Vec<_>, std::io::Error>>()
-            .map_err(io)?;
+        let mut found = Vec::new();
 
-        paths.sort();
+        for entry in std::fs::read_dir(dir).map_err(|e| config(dir, &e))? {
+            let path = entry.map_err(|e| config(dir, &e))?.path();
+            let mercator = path.join("mercator.tif");
 
-        for path in paths {
-            let text = match std::fs::read_to_string(&path) {
-                Ok(text) => text,
-                // Anything without one is not a dataset: `.git`, the README.
-                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-                    continue;
-                }
-                // Skipping it could leave a credit out.
-                Err(e) => return Err(AppError::Config(format!("{}: {e}", path.display()))),
-            };
+            // Anything without the link is not served: `.git`, the README, and
+            // datasets only the elevation API reads.
+            match std::fs::symlink_metadata(&mercator) {
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => continue,
+                Err(e) => return Err(config(&mercator, &e)),
+            }
 
-            let source: SourceJson = serde_json::from_str(&text)
-                .map_err(|e| AppError::Config(format!("{}: {e}", path.display())))?;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let (number, slug) = name.split_at(name.find(|c: char| !c.is_ascii_digit()).unwrap_or(name.len()));
 
-            let licenses: Vec<License> = source
+            let number = number
+                .parse::<u32>()
+                .map_err(|_| config(&path, &"the directory has no NNN precedence"))?;
+
+            let key = slug
+                .strip_prefix('-')
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| config(&path, &"the directory has no slug"))?
+                .replace('-', "_");
+
+            let json = path.join("source.json");
+            let text = std::fs::read_to_string(&json).map_err(|e| config(&json, &e))?;
+            let source: SourceJson = serde_json::from_str(&text).map_err(|e| config(&json, &e))?;
+
+            let credits: Vec<License> = source
                 .attributions
                 .into_iter()
                 .map(|a| License {
@@ -75,44 +91,17 @@ impl Licenses {
                 })
                 .collect();
 
-            // `245-de_by` also answers as `de_by`: every German state is
-            // named `de`, and a source built from one state credits it alone.
-            let dataset = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .map(|n| n.trim_start_matches(|c: char| c.is_ascii_digit()))
-                .and_then(|n| n.strip_prefix('-'))
-                .filter(|n| !n.is_empty() && *n != source.name)
-                .map(str::to_owned);
-
-            for key in std::iter::once(source.name).chain(dataset) {
-                let credits = by_key.entry(key).or_default();
-
-                for license in &licenses {
-                    // Datasets sharing a name often share a credit, too.
-                    if !credits.contains(license) {
-                        credits.push(license.clone());
-                    }
-                }
+            if credits.is_empty() {
+                return Err(config(&json, &"no attributions, so nothing credits it"));
             }
+
+            found.push((number, key, mercator, credits));
         }
 
-        let mut dict = BTreeMap::new();
+        found.sort_by_key(|f| f.0);
 
-        for key in keys {
-            match by_key.get(*key) {
-                Some(credits) if !credits.is_empty() => {
-                    dict.insert(format!("shading:{key}"), credits.clone());
-                }
-                _ => {
-                    return Err(AppError::Config(format!(
-                        "no dataset in {} is named or keyed {key}, so nothing credits it",
-                        dir.display()
-                    )));
-                }
-            }
-        }
+        let dict: BTreeMap<String, &Vec<License>> =
+            found.iter().map(|(_, key, _, credits)| (format!("shading:{key}"), credits)).collect();
 
         let body = serde_json::to_vec(&dict).map_err(|e| AppError::Config(e.to_string()))?;
 
@@ -122,8 +111,11 @@ impl Licenses {
         });
 
         Ok(Self {
-            etag: format!("\"{hash:016x}\""),
-            body: body.into(),
+            sources: found.into_iter().map(|(_, key, path, _)| (key, path)).collect(),
+            licenses: Licenses {
+                etag: format!("\"{hash:016x}\""),
+                body: body.into(),
+            },
         })
     }
 }

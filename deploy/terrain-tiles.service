@@ -13,51 +13,13 @@ RequiresMountsFor=/fm/storage1 /fm/storage2
 Type=simple
 User=martin
 WorkingDirectory=/fm/storage2/terrain
-# Highest priority first; keys are what X-Attribution names as s<key>. cz comes
-# after its neighbours: its fill reaches 500 m past the border, over their data.
+# The sources, their order and credits come from elevation-sources: every
+# dataset there that links a mercator.tif.
 ExecStart=/fm/storage2/terrain/build/target/release/terrain-tiles \
     --listen 127.0.0.1:3040 \
     --cache-mb 2048 \
     --max-age 86400 \
-    --elevation-sources /fm/storage1/backend.freemap.sk-data/elevation-sources \
-    --source sk=sk.tif \
-    --source ch=ch.tif \
-    --source at=at.tif \
-    --source de_by=de_by.tif \
-    --source de_bw=de_bw.tif \
-    --source de_he=de_he.tif \
-    --source de_sn=de_sn.tif \
-    --source de_th=de_th.tif \
-    --source de_nw=de_nw.tif \
-    --source de_rp=de_rp.tif \
-    --source de_sl=de_sl.tif \
-    --source de_ni=de_ni.tif \
-    --source de_hb=de_hb.tif \
-    --source de_hh=de_hh.tif \
-    --source de_sh=de_sh.tif \
-    --source de_mv=de_mv.tif \
-    --source de_bb=de_bb.tif \
-    --source de_st=de_st.tif \
-    --source nl=nl.tif \
-    --source be_vlg=be_vlg.tif \
-    --source be_wal=be_wal.tif \
-    --source lu=lu.tif \
-    --source si=si.tif \
-    --source hr=hr.tif \
-    --source pl=pl.tif \
-    --source cz=cz.tif \
-    --source it=it.tif \
-    --source es=/fm/storage1/terrain/es_30.tif \
-    --source es=/fm/storage1/terrain/es_29.tif \
-    --source es=/fm/storage1/terrain/es_31.tif \
-    --source fr=fr.tif \
-    --source en=/fm/storage1/terrain/en.tif \
-    --source wls=/fm/storage1/terrain/wls.tif \
-    --source no=/fm/storage1/terrain/no.tif \
-    --source fi=/fm/storage1/terrain/fi.tif \
-    --source dk=/fm/storage1/terrain/dk.tif \
-    --source se=/fm/storage1/terrain/se.tif \
-    --source gedtm30=gedtm30.tif
+    --elevation-sources /fm/storage1/backend.freemap.sk-data/elevation-sources
 
 # Everything else on fm6 matters more: past these, this service is throttled
 # and then killed alone rather than the kernel picking a victim.
