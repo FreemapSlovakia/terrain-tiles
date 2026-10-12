@@ -56,6 +56,7 @@ final.
 | `no` | z16 | Kartverket DTM, 1 m raster (EPSG:25833) |
 | `fi` | z16 | NLS elevation model, 2 m raster (EPSG:3067) |
 | `dk` | z17 | Danmarks Højdemodel terrain, 1 m raster (EPSG:25832) |
+| `se` | z16 | Lantmäteriet Markhöjdmodell, 1 m raster (EPSG:3006, whose N,E axis order needs the axisswap) |
 | `gedtm30` | z13 | GEDTM30, 30 m, Europe |
 
 ## Running
