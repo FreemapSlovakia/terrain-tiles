@@ -20,6 +20,8 @@ enum Method {
     SlopeClassic,
     ColorRelief,
     Aspect,
+    Curvature,
+    Contours,
 }
 
 #[derive(Debug)]
@@ -28,6 +30,9 @@ struct Component {
     contrast: f32,
     brightness: f32,
     exaggeration: f32,
+    // Contours' spacing in metres and line width in pixels.
+    interval: f32,
+    line_width: f32,
     stops: Vec<(f32, Rgba)>,
     // Derived once from azimuth and altitude rather than per pixel.
     light: [f32; 3],
@@ -111,14 +116,25 @@ impl Shading {
                 "slope-classic" => Method::SlopeClassic,
                 "color-relief" => Method::ColorRelief,
                 "aspect" => Method::Aspect,
+                "curvature" => Method::Curvature,
+                "contours" => Method::Contours,
                 _ => return Err(AppError::BadRequest(format!("unknown component {kind}"))),
             };
 
             let (mut azimuth, mut altitude, mut exaggeration) = (f32::NAN, f32::NAN, 1.0);
+            let (mut interval, mut line_width) = (f32::NAN, f32::NAN);
             let mut stops = Vec::new();
 
-            if matches!(method, Method::ColorRelief | Method::Aspect) {
-                for pair in params.chunks(2) {
+            if matches!(method, Method::ColorRelief | Method::Aspect | Method::Curvature) {
+                // Curvature's exaggeration precedes its stops.
+                let pairs = if method == Method::Curvature {
+                    exaggeration = num(params.first().copied().unwrap_or_default())?;
+                    params.get(1..).unwrap_or_default()
+                } else {
+                    &params[..]
+                };
+
+                for pair in pairs.chunks(2) {
                     stops.push((
                         num(pair.first().copied().unwrap_or_default())?,
                         color(pair.get(1).unwrap_or(&""))?,
@@ -130,15 +146,20 @@ impl Shading {
                 let mut it = params.into_iter();
                 let mut next = || num(it.next().unwrap_or_default());
 
-                if matches!(method, Method::HillshadeIgor | Method::HillshadeClassic) {
-                    azimuth = next()?.to_radians();
-                }
+                if method == Method::Contours {
+                    interval = next()?;
+                    line_width = next()?;
+                } else {
+                    if matches!(method, Method::HillshadeIgor | Method::HillshadeClassic) {
+                        azimuth = next()?.to_radians();
+                    }
 
-                if matches!(method, Method::HillshadeClassic | Method::SlopeClassic) {
-                    altitude = next()?.to_radians();
-                }
+                    if matches!(method, Method::HillshadeClassic | Method::SlopeClassic) {
+                        altitude = next()?.to_radians();
+                    }
 
-                exaggeration = next()?;
+                    exaggeration = next()?;
+                }
             }
 
             let zenith = FRAC_PI_2 - altitude;
@@ -149,6 +170,8 @@ impl Shading {
                 contrast: contrast.unwrap_or(1.0),
                 brightness: brightness.unwrap_or(0.0),
                 exaggeration,
+                interval,
+                line_width,
                 stops,
                 light: [
                     azimuth.sin() * zenith_sin,
@@ -277,6 +300,38 @@ impl Shading {
                         acc.put(i, col[3] * alpha_k, col);
                     }
                 }
+                Method::Curvature => {
+                    for y in 0..TILE {
+                        let k = c.exaggeration / w.ground_px(y + BUFFER) as f32;
+
+                        for x in 0..TILE {
+                            let v = curvature(heights, x + BUFFER, y + BUFFER) * k;
+                            let col = if v.is_nan() {
+                                [0.0; 4]
+                            } else {
+                                interpolate(&c.stops, v)
+                            };
+
+                            acc.put(y * TILE + x, col[3] * alpha_k, col);
+                        }
+                    }
+                }
+                Method::Contours => {
+                    let col = c.stops[0].1;
+
+                    for y in 0..TILE {
+                        let ground = w.ground_px(y + BUFFER) as f32;
+
+                        for x in 0..TILE {
+                            let i = y * TILE + x;
+                            let h = heights[(y + BUFFER) * SIZE + x + BUFFER];
+                            let t = contour(h, gx[i].hypot(gy[i]) * ground, c.interval, c.line_width);
+
+                            // Contrast and brightness act on the line only; off it stays clear.
+                            acc.put(i, col[3] * t * alpha_k.max(0.0), col);
+                        }
+                    }
+                }
             }
         }
 
@@ -398,6 +453,36 @@ impl Acc {
     }
 }
 
+/// How far the 5×5 neighbourhood's mean lies above the centre at `x`, `y` in
+/// the buffered window, in metres; NaN when any of it has no data.
+#[inline(always)]
+fn curvature(heights: &[f32], x: usize, y: usize) -> f32 {
+    let mut sum = 0.0;
+
+    for row in heights[(y - 2) * SIZE..].chunks(SIZE).take(5) {
+        sum += row[x - 2..=x + 2].iter().sum::<f32>();
+    }
+
+    let centre = heights[y * SIZE + x];
+
+    (sum - centre) / 24.0 - centre
+}
+
+/// Contour coverage from the height `h` and its change per pixel `grad`:
+/// antialiased over one pixel, 0 where either is NaN.
+#[inline(always)]
+fn contour(h: f32, grad: f32, interval: f32, line_width: f32) -> f32 {
+    let t = h / interval + 0.5;
+    let off = (t - t.floor() - 0.5).abs() * interval;
+    let px = off / grad;
+
+    if px >= 0.0 {
+        (line_width * 0.5 + 0.5 - px).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// Unit surface normal from a gradient; flat where the gradient is NaN.
 #[inline(always)]
 fn normal(gx: f32, gy: f32, exaggeration: f32) -> [f32; 3] {
@@ -496,7 +581,7 @@ mod tests {
                 let (mut sum_rgb, mut sum_alpha, mut alpha_product) = ([0.0f32; 3], 0.0f32, 1.0f32);
 
                 for c in &s.components {
-                    let n = if c.method == Method::ColorRelief {
+                    let n = if matches!(c.method, Method::ColorRelief | Method::Curvature | Method::Contours) {
                         [0.0, 0.0, 1.0]
                     } else {
                         normal(c.exaggeration)
@@ -537,9 +622,46 @@ mod tests {
                                 )
                             }
                         }
+                        Method::Curvature => {
+                            let mut sum = 0.0;
+
+                            for yy in y - 2..=y + 2 {
+                                for xx in x - 2..=x + 2 {
+                                    sum += at(xx, yy);
+                                }
+                            }
+
+                            let k = ((sum - e) / 24.0 - e) / ground * c.exaggeration;
+
+                            (1.0, if k.is_nan() { [0.0; 4] } else { interpolate(&c.stops, k) })
+                        }
+                        Method::Contours => {
+                            let (nn, nz, np) = (at(x - 1, y - 1), at(x - 1, y), at(x - 1, y + 1));
+                            let (zn, zp) = (at(x, y - 1), at(x, y + 1));
+                            let (pn, pz, pp) = (at(x + 1, y - 1), at(x + 1, y), at(x + 1, y + 1));
+                            let dzdx = (-nn + pn - 2.0 * nz + 2.0 * pz - np + pp) / 8.0;
+                            let dzdy = (-nn - 2.0 * zn - pn + np + 2.0 * zp + pp) / 8.0;
+                            let t = elev / c.interval + 0.5;
+                            let off = (t - t.floor() - 0.5).abs() * c.interval;
+                            let px = off / dzdx.hypot(dzdy);
+
+                            (
+                                if !is_nan && px >= 0.0 {
+                                    (c.line_width * 0.5 + 0.5 - px).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                },
+                                c.stops[0].1,
+                            )
+                        }
                     };
 
-                    let alpha = color[3] * (c.contrast * (intensity - 0.5) + 0.5 + c.brightness);
+                    let alpha = color[3]
+                        * if c.method == Method::Contours {
+                            intensity * (c.contrast * 0.5 + 0.5 + c.brightness).max(0.0)
+                        } else {
+                            c.contrast * (intensity - 0.5) + 0.5 + c.brightness
+                        };
 
                     for i in 0..3 {
                         sum_rgb[i] += alpha * color[i];
@@ -615,6 +737,11 @@ mod tests {
             "ffffffff!aspect_0.0_ff0000ff_3.14_00ff00ff_6.28_0000ffff",
             "ffffffff!hillshade-igor_315.0_1.0_000000ff!slope-igor_1.0_00000080!hillshade-classic_135.0_30.0_1.0_ffd00080",
             "000000ff!hillshade-classic~1.40~-0.10_315.0_45.0_1.0_ffffffff",
+            "a09894ff!curvature_1.0_-0.400_fff2d6e6_-0.020_fff2d600_0.020_1c5c6600_0.400_1c5c66e6",
+            "00000000!curvature~1.20~0.10_2.5_-0.100_ffffffff_0.100_000000ff",
+            "00000000!contours_20.0_0.75_8b5a2bb3!contours~1.50~-0.20_100.0_1.50_000000e6",
+            "ffffffff!hillshade-igor_315.0_1.0_00000099!contours~2.00~-0.10_20.0_1.00_8b5a2bff",
+            "ffffffff!contours_7.5_2.00_ff0000ff!hillshade-igor_315.0_1.0_00000099",
         ] {
             let shading = Shading::parse(s).unwrap();
             let fast = shading.render(&h, &w);
