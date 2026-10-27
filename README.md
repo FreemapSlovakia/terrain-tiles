@@ -83,17 +83,17 @@ outdoor renderer's `/licenses` keys its own, so a client resolves
 
 ### Tiles
 
-Both tile routes serve the tile plus a 2 px buffer's worth of data from its
-neighbours.
+Both tile routes read the tile plus a buffer of data from its neighbours:
+2 px unless asked for more.
 
-### `GET /elevation/{z}/{x}/{y}`
+### `GET /elevation/{z}/{x}/{y}?buffer=2…64`
 
 zstd over:
 
 | bytes | content |
 | --- | --- |
 | 4 | `f32` LE height step, metres: 2 mm at z18 and above, doubling per zoom below |
-| 4 | `u32` LE side, pixels (260: 256 + 2 × 2 buffer) |
+| 4 | `u32` LE side, pixels: 256 + 2 × `buffer` |
 | side² × 4 | `i32` LE heights in steps, row-major, each row delta-coded from 0 |
 
 Decode a row by wrapping cumulative sum. `i32::MIN` after decoding is no data.
@@ -101,5 +101,6 @@ Decode a row by wrapping cumulative sum. `i32::MIN` after decoding is no data.
 ### `GET /hillshade/{z}/{x}/{y}?shading=…&format=png|jpeg|webp`
 
 `shading` is the web client's `serializeShading` string (default: its
-default shading). The slope uses the ground pixel size at each row's latitude.
+default shading); the buffer is the widest its layers read. The slope uses the
+ground pixel size at each row's latitude.
 JPEG composites over white; PNG and WebP (lossy, quality 90) keep alpha.

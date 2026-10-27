@@ -8,7 +8,7 @@ use crate::{
     mosaic,
     shading::{self, Planes, Shading},
     source::{Source, bicubic, cubic_weights},
-    tile::{BUFFER, SIZE, TILE, TileWindow},
+    tile::{TILE, TileWindow},
 };
 use std::{
     collections::HashMap,
@@ -134,7 +134,9 @@ impl Ancestors {
             return Ok(p.clone());
         }
 
-        let w = TileWindow::new(z, x, y, z).ok_or(AppError::NotFound)?;
+        let w = TileWindow::new(z, x, y, z)
+            .ok_or(AppError::NotFound)?
+            .with_buffer(shading.buffer());
 
         let planes = match mosaic::read(sources, &w, false)? {
             Some(m) => shading.render(&m.heights, &w),
@@ -214,14 +216,14 @@ fn coarse_zooms(sources: &[Source], z: u8) -> Vec<u8> {
 }
 
 /// The ancestor windows a hillshade tile at `w` may be scaled up from: one set
-/// per source zoom coarser than `w.z`.
+/// per source zoom coarser than `w.z`, buffered as `w`.
 pub fn dependencies(w: &TileWindow, sources: &[Source]) -> Vec<TileWindow> {
     coarse_zooms(sources, w.z)
         .into_iter()
         .flat_map(|za| {
-            ancestor_tiles(w, za)
-                .into_iter()
-                .filter_map(move |(x, y)| TileWindow::new(za, x, y, za))
+            ancestor_tiles(w, za).into_iter().filter_map(move |(x, y)| {
+                TileWindow::new(za, x, y, za).map(|a| a.with_buffer(w.buffer))
+            })
         })
         .collect()
 }
@@ -255,14 +257,14 @@ impl Plan {
         let coarse = coarse_zooms(sources, w.z);
         let fill = coarse.last().copied().unwrap_or(DIRECT);
 
+        let (b, size) = (w.buffer, w.size());
+
         let mut zooms: Vec<u8> = (0..TILE * TILE)
-            .map(
-                |i| match native[(i / TILE + BUFFER) * SIZE + i % TILE + BUFFER] {
-                    u8::MAX => fill,
-                    n if n >= w.z => DIRECT,
-                    n => n,
-                },
-            )
+            .map(|i| match native[(i / TILE + b) * size + i % TILE + b] {
+                u8::MAX => fill,
+                n if n >= w.z => DIRECT,
+                n => n,
+            })
             .collect();
 
         let mut used = [false; 256];

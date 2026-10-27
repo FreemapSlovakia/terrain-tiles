@@ -116,7 +116,9 @@ fn main() {
 
         for y in args.y0 / f..(args.y0 + args.n) / f {
             for x in args.x0 / f..(args.x0 + args.n) / f {
-                let w = TileWindow::new(z, x, y, 18).unwrap();
+                let w = TileWindow::new(z, x, y, 18)
+                    .unwrap()
+                    .with_buffer(shading.buffer());
 
                 let Some(m) = stats
                     .get("read + mosaic")
@@ -176,7 +178,7 @@ fn main() {
 
                 stats
                     .get("elevation 2 mm + zstd")
-                    .encode(|| elevation::encode(&m.heights, z).unwrap());
+                    .encode(|| elevation::encode(&m.heights, &w).unwrap());
             }
         }
 

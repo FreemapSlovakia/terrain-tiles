@@ -2,7 +2,7 @@ use crate::{
     error::AppError,
     footprint::Footprint,
     pool::{Pool, Stats},
-    tile::{PX_Z0, SIZE, TileWindow},
+    tile::{PX_Z0, TileWindow},
 };
 use gdal::{Dataset, raster::ResampleAlg};
 use std::{
@@ -158,10 +158,17 @@ impl Source {
         let c0 = (west - self.west) / self.px;
         let r0 = (self.north - north) / self.px;
 
+        let size = w.size();
+
         if f >= 1.0 {
-            self.read_downsampled(c0.round() as isize, r0.round() as isize, f.round() as usize)
+            self.read_downsampled(
+                c0.round() as isize,
+                r0.round() as isize,
+                f.round() as usize,
+                size,
+            )
         } else {
-            self.read_upsampled(c0, r0, f)
+            self.read_upsampled(c0, r0, f, size)
         }
     }
 
@@ -183,13 +190,19 @@ impl Source {
 
     /// At or below the native zoom: whole output pixels map onto `f` source
     /// pixels, so GDAL reads the matching overview.
-    fn read_downsampled(&self, c0: isize, r0: isize, f: usize) -> Result<Vec<f32>, AppError> {
-        let mut out = vec![f32::NAN; SIZE * SIZE];
+    fn read_downsampled(
+        &self,
+        c0: isize,
+        r0: isize,
+        f: usize,
+        size: usize,
+    ) -> Result<Vec<f32>, AppError> {
+        let mut out = vec![f32::NAN; size * size];
         let fi = f as isize;
 
         let clip = |start: isize, len: usize| {
             let lo = if start < 0 { (-start + fi - 1) / fi } else { 0 };
-            let hi = ((len as isize - start) / fi).min(SIZE as isize);
+            let hi = ((len as isize - start) / fi).min(size as isize);
 
             (lo.max(0) as usize, hi.max(0) as usize)
         };
@@ -216,7 +229,7 @@ impl Source {
 
         for y in 0..oh {
             for x in 0..ow {
-                out[(oy0 + y) * SIZE + ox0 + x] = self.value(data[y * ow + x]);
+                out[(oy0 + y) * size + ox0 + x] = self.value(data[y * ow + x]);
             }
         }
 
@@ -224,12 +237,12 @@ impl Source {
     }
 
     /// Above the native zoom: bicubic between source pixel centres.
-    fn read_upsampled(&self, c0: f64, r0: f64, f: f64) -> Result<Vec<f32>, AppError> {
-        let mut out = vec![f32::NAN; SIZE * SIZE];
+    fn read_upsampled(&self, c0: f64, r0: f64, f: f64, size: usize) -> Result<Vec<f32>, AppError> {
+        let mut out = vec![f32::NAN; size * size];
 
         // Source-pixel-centre coordinates of the first and last output pixel centre.
         let first = |o: f64| o + 0.5 * f - 0.5;
-        let last = |o: f64| o + (SIZE as f64 - 0.5) * f - 0.5;
+        let last = |o: f64| o + (size as f64 - 0.5) * f - 0.5;
 
         let sx0 = (first(c0).floor() as isize - 1).max(0);
         let sy0 = (first(r0).floor() as isize - 1).max(0);
@@ -249,7 +262,7 @@ impl Source {
 
         // A row's or column's taps and weights are the same for every pixel on it.
         let taps = |o: f64, s0: isize, len: usize| -> Vec<Option<(usize, [f64; 4])>> {
-            (0..SIZE)
+            (0..size)
                 .map(|i| {
                     let t = first(o) + i as f64 * f - s0 as f64;
                     let i0 = t.floor() as isize;
@@ -267,7 +280,7 @@ impl Source {
 
             for (x, col) in cols.iter().enumerate() {
                 if let Some((ix, wx)) = col {
-                    out[y * SIZE + x] = bicubic(&src[iy * sw + ix..], sw, wx, wy);
+                    out[y * size + x] = bicubic(&src[iy * sw + ix..], sw, wx, wy);
                 }
             }
         }

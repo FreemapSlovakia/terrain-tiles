@@ -6,11 +6,13 @@ pub const TILE: usize = 256;
 /// Pixel size at z0, projected metres.
 pub const PX_Z0: f64 = 2.0 * HALF_WORLD / TILE as f64;
 
-/// Pixels read beyond each tile edge, so a 3×3 normal at the edge sees its
-/// neighbours; the parametric-shading client expects exactly two.
+/// Pixels read beyond each tile edge unless more are asked for, so a 3×3
+/// normal at the edge sees its neighbours; the parametric-shading client
+/// expects exactly two.
 pub const BUFFER: usize = 2;
 
-pub const SIZE: usize = TILE + 2 * BUFFER;
+/// The widest buffer a request may ask for.
+pub const MAX_BUFFER: usize = 64;
 
 /// An XYZ tile plus its buffer.
 #[derive(Clone, Copy)]
@@ -18,13 +20,28 @@ pub struct TileWindow {
     pub z: u8,
     pub x: u32,
     pub y: u32,
+    pub buffer: usize,
 }
 
 impl TileWindow {
     pub fn new(z: u8, x: u32, y: u32, max_zoom: u8) -> Option<Self> {
         let n = 1u32.checked_shl(z.into())?;
 
-        (z <= max_zoom && x < n && y < n).then_some(Self { z, x, y })
+        (z <= max_zoom && x < n && y < n).then_some(Self {
+            z,
+            x,
+            y,
+            buffer: BUFFER,
+        })
+    }
+
+    pub fn with_buffer(self, buffer: usize) -> Self {
+        Self { buffer, ..self }
+    }
+
+    /// Side of the buffered window, pixels.
+    pub fn size(&self) -> usize {
+        TILE + 2 * self.buffer
     }
 
     /// Pixel size at this zoom, projected metres.
@@ -36,16 +53,12 @@ impl TileWindow {
     pub fn bounds(&self) -> (f64, f64, f64, f64) {
         let px = self.px();
         let tile = px * TILE as f64;
-        let b = px * BUFFER as f64;
+        let b = px * self.buffer as f64;
         let west = -HALF_WORLD + self.x as f64 * tile - b;
         let north = HALF_WORLD - self.y as f64 * tile + b;
+        let size = self.size() as f64 * px;
 
-        (
-            west,
-            north - SIZE as f64 * px,
-            west + SIZE as f64 * px,
-            north,
-        )
+        (west, north - size, west + size, north)
     }
 
     /// Ground metres per pixel on window row `row`.

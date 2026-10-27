@@ -24,7 +24,7 @@ use terrain_tiles::{
     overzoom::{self, Ancestors, Plan},
     shading::{self, Shading},
     source::Source,
-    tile::TileWindow,
+    tile::{BUFFER, MAX_BUFFER, TileWindow},
 };
 use tokio::sync::Semaphore;
 
@@ -255,11 +255,14 @@ struct Tile {
 async fn serve_tile(
     state: Arc<AppState>,
     (z, x, y): (u8, u32, u32),
+    buffer: usize,
     request: &HeaderMap,
     dependencies: impl FnOnce(&TileWindow, &[Source]) -> Vec<TileWindow>,
     work: impl FnOnce(&AppState, TileWindow) -> Result<Tile, AppError> + Send + 'static,
 ) -> Result<Response, AppError> {
-    let w = TileWindow::new(z, x, y, state.max_zoom).ok_or(AppError::NotFound)?;
+    let w = TileWindow::new(z, x, y, state.max_zoom)
+        .ok_or(AppError::NotFound)?
+        .with_buffer(buffer);
     let mut windows = dependencies(&w, &state.sources);
 
     windows.push(w);
@@ -350,21 +353,37 @@ async fn get_licenses(State(state): State<Arc<AppState>>, request: HeaderMap) ->
     (headers, l.body.clone()).into_response()
 }
 
+#[derive(Deserialize)]
+struct ElevationQuery {
+    /// Pixels beyond each tile edge.
+    buffer: Option<usize>,
+}
+
 async fn elevation(
     State(state): State<Arc<AppState>>,
     Path(zxy): Path<(u8, u32, u32)>,
+    Query(q): Query<ElevationQuery>,
     request: HeaderMap,
 ) -> Result<Response, AppError> {
+    let buffer = q.buffer.unwrap_or(BUFFER);
+
+    if !(BUFFER..=MAX_BUFFER).contains(&buffer) {
+        return Err(AppError::BadRequest(format!(
+            "buffer must be {BUFFER} to {MAX_BUFFER}"
+        )));
+    }
+
     serve_tile(
         state,
         zxy,
+        buffer,
         &request,
         |_, _| Vec::new(),
         |state, w| {
             let m = mosaic::read(&state.sources, &w, false)?.ok_or(AppError::NotFound)?;
 
             Ok(Tile {
-                body: elevation::encode(&m.heights, w.z)?,
+                body: elevation::encode(&m.heights, &w)?,
                 content_type: "application/octet-stream",
                 credited: m.credited,
             })
@@ -392,6 +411,7 @@ async fn hillshade(
     serve_tile(
         state,
         zxy,
+        shading.buffer(),
         &request,
         overzoom::dependencies,
         move |state, w| {

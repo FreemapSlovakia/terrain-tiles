@@ -4,7 +4,7 @@
 
 use crate::{
     error::AppError,
-    tile::{BUFFER, SIZE, TILE, TileWindow},
+    tile::{BUFFER, TILE, TileWindow},
 };
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -216,6 +216,23 @@ impl Shading {
             .all(|c| c[0] == c[1] && c[1] == c[2])
     }
 
+    /// Pixels `render` reads beyond each tile edge.
+    pub fn buffer(&self) -> usize {
+        self.components
+            .iter()
+            .map(|c| match c.method {
+                Method::HillshadeIgor
+                | Method::HillshadeClassic
+                | Method::SlopeIgor
+                | Method::SlopeClassic
+                | Method::ColorRelief
+                | Method::Aspect
+                | Method::Curvature
+                | Method::Contours => BUFFER,
+            })
+            .fold(BUFFER, usize::max)
+    }
+
     /// A tile with no terrain: the background alone.
     pub fn background_planes(&self) -> Planes {
         let [r, g, b, a] = self.background;
@@ -233,16 +250,17 @@ impl Shading {
         // data or a neighbour has none; NaN shades as flat ground.
         let mut gx = vec![0.0f32; N];
         let mut gy = vec![0.0f32; N];
+        let (b, size) = (w.buffer, w.size());
 
         for y in 0..TILE {
-            let inv = 1.0 / (8.0 * w.ground_px(y + BUFFER) as f32);
-            let r0 = &heights[(y + BUFFER - 1) * SIZE..][..SIZE];
-            let r1 = &heights[(y + BUFFER) * SIZE..][..SIZE];
-            let r2 = &heights[(y + BUFFER + 1) * SIZE..][..SIZE];
+            let inv = 1.0 / (8.0 * w.ground_px(y + b) as f32);
+            let r0 = &heights[(y + b - 1) * size..][..size];
+            let r1 = &heights[(y + b) * size..][..size];
+            let r2 = &heights[(y + b + 1) * size..][..size];
             let (gx, gy) = (&mut gx[y * TILE..][..TILE], &mut gy[y * TILE..][..TILE]);
 
             for x in 0..TILE {
-                let c = x + BUFFER;
+                let c = x + b;
                 let (nn, zn, pn) = (r0[c - 1], r0[c], r0[c + 1]);
                 let (nz, zz, pz) = (r1[c - 1], r1[c], r1[c + 1]);
                 let (np, zp, pp) = (r2[c - 1], r2[c], r2[c + 1]);
@@ -295,7 +313,7 @@ impl Shading {
                 }
                 Method::ColorRelief => {
                     for i in 0..N {
-                        let h = heights[(i / TILE + BUFFER) * SIZE + i % TILE + BUFFER];
+                        let h = heights[(i / TILE + b) * size + i % TILE + b];
                         let col = interpolate(&c.stops, if h.is_nan() { 0.0 } else { h });
 
                         acc.put(i, col[3] * alpha_k, col);
@@ -316,10 +334,10 @@ impl Shading {
                 }
                 Method::Curvature => {
                     for y in 0..TILE {
-                        let k = c.exaggeration / w.ground_px(y + BUFFER) as f32;
+                        let k = c.exaggeration / w.ground_px(y + b) as f32;
 
                         for x in 0..TILE {
-                            let v = curvature(heights, x + BUFFER, y + BUFFER) * k;
+                            let v = curvature(heights, size, x + b, y + b) * k;
                             let col = if v.is_nan() {
                                 [0.0; 4]
                             } else {
@@ -334,11 +352,11 @@ impl Shading {
                     let col = c.stops[0].1;
 
                     for y in 0..TILE {
-                        let ground = w.ground_px(y + BUFFER) as f32;
+                        let ground = w.ground_px(y + b) as f32;
 
                         for x in 0..TILE {
                             let i = y * TILE + x;
-                            let h = heights[(y + BUFFER) * SIZE + x + BUFFER];
+                            let h = heights[(y + b) * size + x + b];
                             let t = contour(h, gx[i].hypot(gy[i]) * ground, c.interval, c.line_width);
 
                             // Contrast and brightness act on the line only; off it stays clear.
@@ -484,16 +502,17 @@ impl Acc {
 }
 
 /// How far the 5×5 neighbourhood's mean lies above the centre at `x`, `y` in
-/// the buffered window, in metres; NaN when any of it has no data.
+/// the buffered window, `size` pixels wide, in metres; NaN when any of it has
+/// no data.
 #[inline(always)]
-fn curvature(heights: &[f32], x: usize, y: usize) -> f32 {
+fn curvature(heights: &[f32], size: usize, x: usize, y: usize) -> f32 {
     let mut sum = 0.0;
 
-    for row in heights[(y - 2) * SIZE..].chunks(SIZE).take(5) {
+    for row in heights[(y - 2) * size..].chunks(size).take(5) {
         sum += row[x - 2..=x + 2].iter().sum::<f32>();
     }
 
-    let centre = heights[y * SIZE + x];
+    let centre = heights[y * size + x];
 
     (sum - centre) / 24.0 - centre
 }
@@ -576,13 +595,14 @@ mod tests {
 
     /// The straight per-pixel port of `shading.wgsl`, with exact trigonometry.
     fn reference(s: &Shading, heights: &[f32], w: &TileWindow) -> Vec<Rgba> {
-        let at = |x: usize, y: usize| heights[y * SIZE + x];
+        let (b, size) = (w.buffer, w.size());
+        let at = |x: usize, y: usize| heights[y * size + x];
         let mut out = Vec::with_capacity(N);
 
-        for y in BUFFER..BUFFER + TILE {
+        for y in b..b + TILE {
             let ground = w.ground_px(y) as f32;
 
-            for x in BUFFER..BUFFER + TILE {
+            for x in b..b + TILE {
                 let e = at(x, y);
                 let is_nan = e.is_nan();
                 let elev = if is_nan { 0.0 } else { e };
@@ -741,17 +761,17 @@ mod tests {
     }
 
     /// Rough terrain from 0 to ~600 m with holes, cliffs and flat patches.
-    fn terrain() -> Vec<f32> {
-        let mut h = vec![0.0f32; SIZE * SIZE];
+    fn terrain(size: usize) -> Vec<f32> {
+        let mut h = vec![0.0f32; size * size];
         let mut seed = 12345u32;
 
-        for y in 0..SIZE {
-            for x in 0..SIZE {
+        for y in 0..size {
+            for x in 0..size {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let noise = (seed >> 8) as f32 / (1 << 24) as f32;
                 let (fx, fy) = (x as f32 / 20.0, y as f32 / 27.0);
 
-                h[y * SIZE + x] = if (40..60).contains(&x) && (100..130).contains(&y) {
+                h[y * size + x] = if (40..60).contains(&x) && (100..130).contains(&y) {
                     f32::NAN
                 } else if x > 200 && y < 50 {
                     300.0
@@ -780,9 +800,36 @@ mod tests {
     }
 
     #[test]
+    fn a_wider_buffer_shades_the_tile_the_same() {
+        let wide = TileWindow::new(18, 143_940, 90_180, 20)
+            .unwrap()
+            .with_buffer(16);
+        let narrow = wide.with_buffer(BUFFER);
+        let h = terrain(wide.size());
+        let skip = wide.buffer - BUFFER;
+
+        let cropped: Vec<f32> = h
+            .chunks_exact(wide.size())
+            .skip(skip)
+            .take(narrow.size())
+            .flat_map(|row| &row[skip..skip + narrow.size()])
+            .copied()
+            .collect();
+
+        let s = Shading::parse(
+            "ffffffff!hillshade-igor_315.0_1.0_000000ff!curvature_1.0_-0.1_ff0000ff_0.1_0000ffff!contours_20.0_0.75_000000ff!color-relief_200.0_00ff00ff_600.0_ff0000ff",
+        )
+        .unwrap();
+
+        let (a, b) = (s.render(&h, &wide), s.render(&cropped, &narrow));
+
+        assert_eq!((a.r, a.g, a.b, a.a), (b.r, b.g, b.b, b.a));
+    }
+
+    #[test]
     fn matches_the_exact_port_to_within_one_level() {
-        let h = terrain();
         let w = TileWindow::new(18, 143_940, 90_180, 20).unwrap();
+        let h = terrain(w.size());
 
         for s in [
             "000000ff!hillshade-classic_315.0_45.0_1.0_ffffffff",

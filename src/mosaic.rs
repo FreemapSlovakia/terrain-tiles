@@ -1,7 +1,7 @@
 use crate::{
     error::AppError,
     source::Source,
-    tile::{BUFFER, SIZE, TILE, TileWindow},
+    tile::{TILE, TileWindow},
 };
 
 pub struct Mosaic {
@@ -21,9 +21,10 @@ pub fn read(
     w: &TileWindow,
     with_native: bool,
 ) -> Result<Option<Mosaic>, AppError> {
-    let mut heights = vec![f32::NAN; SIZE * SIZE];
+    let size = w.size();
+    let mut heights = vec![f32::NAN; size * size];
     let mut native = if with_native {
-        vec![u8::MAX; SIZE * SIZE]
+        vec![u8::MAX; size * size]
     } else {
         Vec::new()
     };
@@ -31,11 +32,11 @@ pub fn read(
 
     for source in sources.iter().filter(|s| s.intersects(w)) {
         let data = source.read(w)?;
-        let inner = BUFFER..BUFFER + TILE;
+        let inner = w.buffer..w.buffer + TILE;
         let mut used = false;
         let mut missing = 0;
 
-        let rows = heights.chunks_exact_mut(SIZE).zip(data.chunks_exact(SIZE));
+        let rows = heights.chunks_exact_mut(size).zip(data.chunks_exact(size));
 
         for (y, (row, new)) in rows.enumerate() {
             let in_tile = inner.contains(&y);
@@ -49,7 +50,7 @@ pub fn read(
                     missing += 1;
                 } else {
                     *h = *v;
-                    if let Some(z) = native.get_mut(y * SIZE + x) {
+                    if let Some(z) = native.get_mut(y * size + x) {
                         *z = source.zoom;
                     }
 
