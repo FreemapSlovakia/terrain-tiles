@@ -125,31 +125,45 @@ impl Shading {
             let (mut interval, mut line_width) = (f32::NAN, f32::NAN);
             let mut stops = Vec::new();
 
-            if matches!(method, Method::ColorRelief | Method::Aspect | Method::Curvature) {
-                // Curvature's exaggeration precedes its stops.
-                let pairs = if method == Method::Curvature {
-                    exaggeration = num(params.first().copied().unwrap_or_default())?;
-                    params.get(1..).unwrap_or_default()
-                } else {
-                    &params[..]
-                };
+            // The parameters, then one colour or `value_colour` pairs.
+            let head = match method {
+                Method::ColorRelief | Method::Aspect => 0,
+                Method::SlopeIgor | Method::Curvature => 1,
+                Method::HillshadeIgor | Method::SlopeClassic | Method::Contours => 2,
+                Method::HillshadeClassic => 3,
+            };
 
-                for pair in pairs.chunks(2) {
+            let colors = params.split_off(head.min(params.len()));
+
+            if let [single] = colors[..] {
+                stops.push((0.0, color(single)?));
+            } else {
+                // The client's shader holds 16 stops and ignores the rest.
+                for pair in colors.chunks(2).take(16) {
                     stops.push((
-                        num(pair.first().copied().unwrap_or_default())?,
+                        num(pair[0])?,
                         color(pair.get(1).unwrap_or(&""))?,
                     ));
                 }
-            } else {
-                stops.push((0.0, color(params.pop().unwrap_or_default())?));
+            }
 
-                let mut it = params.into_iter();
-                let mut next = || num(it.next().unwrap_or_default());
+            // The single-colour passes read the first stop.
+            if stops.is_empty()
+                && !matches!(method, Method::ColorRelief | Method::Aspect | Method::Curvature)
+            {
+                return Err(AppError::BadRequest(format!("no colour in {part}")));
+            }
 
-                if method == Method::Contours {
+            let mut it = params.into_iter();
+            let mut next = || num(it.next().unwrap_or_default());
+
+            match method {
+                Method::Contours => {
                     interval = next()?;
                     line_width = next()?;
-                } else {
+                }
+                Method::ColorRelief | Method::Aspect => {}
+                _ => {
                     if matches!(method, Method::HillshadeIgor | Method::HillshadeClassic) {
                         azimuth = next()?.to_radians();
                     }
@@ -444,6 +458,22 @@ impl Acc {
         let col = c.stops[0].1;
         let e = c.exaggeration;
 
+        // With a gradient the number is looked up on the stops, slope-igor's in
+        // degrees, and the colour taken as colour relief takes it.
+        if c.stops.len() > 1 {
+            let unit = if c.method == Method::SlopeIgor { 90.0 } else { 1.0 };
+            let alpha_k = c.contrast * 0.5 + 0.5 + c.brightness;
+
+            for i in 0..N {
+                let [nx, ny, nz] = normal(gx[i], gy[i], e);
+                let col = interpolate(&c.stops, intensity(nx, ny, nz) * unit);
+
+                self.put(i, col[3] * alpha_k, col);
+            }
+
+            return;
+        }
+
         for i in 0..N {
             let [nx, ny, nz] = normal(gx[i], gy[i], e);
             let alpha = col[3] * (c.contrast * (intensity(nx, ny, nz) - 0.5) + 0.5 + c.brightness);
@@ -656,6 +686,23 @@ mod tests {
                         }
                     };
 
+                    let gradient = c.stops.len() > 1
+                        && matches!(
+                            c.method,
+                            Method::HillshadeIgor
+                                | Method::HillshadeClassic
+                                | Method::SlopeIgor
+                                | Method::SlopeClassic
+                        );
+
+                    let (intensity, color) = if gradient {
+                        let unit = if c.method == Method::SlopeIgor { 90.0 } else { 1.0 };
+
+                        (1.0, interpolate(&c.stops, intensity * unit))
+                    } else {
+                        (intensity, color)
+                    };
+
                     let alpha = color[3]
                         * if c.method == Method::Contours {
                             intensity * (c.contrast * 0.5 + 0.5 + c.brightness).max(0.0)
@@ -722,6 +769,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_single_colour_layer_without_its_colour() {
+        for s in [
+            "00000000!hillshade-igor_315.0_1.0",
+            "00000000!contours_20.0_0.75",
+            "00000000!slope-igor",
+        ] {
+            assert!(Shading::parse(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
     fn matches_the_exact_port_to_within_one_level() {
         let h = terrain();
         let w = TileWindow::new(18, 143_940, 90_180, 20).unwrap();
@@ -742,6 +800,9 @@ mod tests {
             "00000000!contours_20.0_0.75_8b5a2bb3!contours~1.50~-0.20_100.0_1.50_000000e6",
             "ffffffff!hillshade-igor_315.0_1.0_00000099!contours~2.00~-0.10_20.0_1.00_8b5a2bff",
             "ffffffff!contours_7.5_2.00_ff0000ff!hillshade-igor_315.0_1.0_00000099",
+            "9e9591ff!slope-igor_2.0_0.000_9e959100_30.000_8a2408ff",
+            "00000000!hillshade-classic~1.50~0.10_315.0_45.0_1.0_0.200_1c3c48ff_0.800_fff0dcff",
+            "ffffffff!hillshade-igor_135.0_1.0_0.000_00000000_2.000_000000ff!slope-classic_45.0_1.0_0.000_00000000_1.000_ff0000ff",
         ] {
             let shading = Shading::parse(s).unwrap();
             let fast = shading.render(&h, &w);
