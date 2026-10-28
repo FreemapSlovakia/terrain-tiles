@@ -30,6 +30,8 @@ struct Component {
     contrast: f32,
     brightness: f32,
     exaggeration: f32,
+    // Curvature's neighbourhood, pixels each way.
+    radius: usize,
     // Contours' spacing in metres and line width in pixels.
     interval: f32,
     line_width: f32,
@@ -81,6 +83,9 @@ fn color(s: &str) -> Result<Rgba, AppError> {
 
 const MAX_COMPONENTS: usize = 8;
 
+/// The widest curvature neighbourhood, pixels each way.
+const MAX_RADIUS: usize = 32;
+
 impl Shading {
     pub fn parse(s: &str) -> Result<Self, AppError> {
         let mut parts = s.split('!');
@@ -123,12 +128,16 @@ impl Shading {
 
             let (mut azimuth, mut altitude, mut exaggeration) = (f32::NAN, f32::NAN, 1.0);
             let (mut interval, mut line_width) = (f32::NAN, f32::NAN);
+            let mut radius = BUFFER;
             let mut stops = Vec::new();
 
             // The parameters, then one colour or `value_colour` pairs.
             let head = match method {
                 Method::ColorRelief | Method::Aspect => 0,
-                Method::SlopeIgor | Method::Curvature => 1,
+                // Its radius, when not the default, makes the count after the
+                // exaggeration odd.
+                Method::Curvature => 1 + params.len().saturating_sub(1) % 2,
+                Method::SlopeIgor => 1,
                 Method::HillshadeIgor | Method::SlopeClassic | Method::Contours => 2,
                 Method::HillshadeClassic => 3,
             };
@@ -163,6 +172,21 @@ impl Shading {
                     line_width = next()?;
                 }
                 Method::ColorRelief | Method::Aspect => {}
+                Method::Curvature => {
+                    exaggeration = next()?;
+
+                    if let Some(r) = it.next() {
+                        radius = r
+                            .parse()
+                            .ok()
+                            .filter(|r| (1..=MAX_RADIUS).contains(r))
+                            .ok_or_else(|| {
+                                AppError::BadRequest(format!(
+                                    "curvature radius must be 1 to {MAX_RADIUS} in {part}"
+                                ))
+                            })?;
+                    }
+                }
                 _ => {
                     if matches!(method, Method::HillshadeIgor | Method::HillshadeClassic) {
                         azimuth = next()?.to_radians();
@@ -184,6 +208,7 @@ impl Shading {
                 contrast: contrast.unwrap_or(1.0),
                 brightness: brightness.unwrap_or(0.0),
                 exaggeration,
+                radius,
                 interval,
                 line_width,
                 stops,
@@ -227,8 +252,8 @@ impl Shading {
                 | Method::SlopeClassic
                 | Method::ColorRelief
                 | Method::Aspect
-                | Method::Curvature
                 | Method::Contours => BUFFER,
+                Method::Curvature => c.radius,
             })
             .fold(BUFFER, usize::max)
     }
@@ -335,9 +360,10 @@ impl Shading {
                 Method::Curvature => {
                     for y in 0..TILE {
                         let k = c.exaggeration / w.ground_px(y + b) as f32;
+                        let r = c.radius.min(b);
 
                         for x in 0..TILE {
-                            let v = curvature(heights, size, x + b, y + b) * k;
+                            let v = curvature(heights, size, x + b, y + b, r) * k;
                             let col = if v.is_nan() {
                                 [0.0; 4]
                             } else {
@@ -501,20 +527,39 @@ impl Acc {
     }
 }
 
-/// How far the 5×5 neighbourhood's mean lies above the centre at `x`, `y` in
-/// the buffered window, `size` pixels wide, in metres; NaN when any of it has
-/// no data.
+/// How far the mean of the heights within `r` pixels lies above the centre at
+/// `x`, `y` in the buffered window, `size` pixels wide, in metres. Pixels
+/// without data are left out; NaN when the centre has none.
 #[inline(always)]
-fn curvature(heights: &[f32], size: usize, x: usize, y: usize) -> f32 {
-    let mut sum = 0.0;
+fn curvature(heights: &[f32], size: usize, x: usize, y: usize, r: usize) -> f32 {
+    let (step, reach) = curvature_samples(r);
+    let (mut sum, mut n) = (0.0f32, 0.0f32);
 
-    for row in heights[(y - 2) * size..].chunks(size).take(5) {
-        sum += row[x - 2..=x + 2].iter().sum::<f32>();
+    for i in 0..=2 * reach {
+        let row = &heights[(y + i * step - reach * step) * size..];
+
+        for j in 0..=2 * reach {
+            let h = row[x + j * step - reach * step];
+
+            if !h.is_nan() {
+                sum += h;
+                n += 1.0;
+            }
+        }
     }
 
     let centre = heights[y * size + x];
 
-    (sum - centre) / 24.0 - centre
+    (sum - centre) / (n - 1.0) - centre
+}
+
+/// Sample spacing and samples each way within radius `r`: every pixel up to
+/// 8, sparser beyond, so never more than 17×17. The client's shader samples
+/// alike.
+fn curvature_samples(r: usize) -> (usize, usize) {
+    let step = r.div_ceil(8).max(1);
+
+    (step, r / step)
 }
 
 /// Contour coverage from the height `h` and its change per pixel `grad`:
@@ -673,15 +718,21 @@ mod tests {
                             }
                         }
                         Method::Curvature => {
-                            let mut sum = 0.0;
+                            let (step, reach) = curvature_samples(c.radius.min(b));
+                            let (mut sum, mut n) = (0.0, 0.0);
 
-                            for yy in y - 2..=y + 2 {
-                                for xx in x - 2..=x + 2 {
-                                    sum += at(xx, yy);
+                            for i in 0..=2 * reach {
+                                for j in 0..=2 * reach {
+                                    let h = at(x + j * step - reach * step, y + i * step - reach * step);
+
+                                    if !h.is_nan() {
+                                        sum += h;
+                                        n += 1.0;
+                                    }
                                 }
                             }
 
-                            let k = ((sum - e) / 24.0 - e) / ground * c.exaggeration;
+                            let k = ((sum - e) / (n - 1.0) - e) / ground * c.exaggeration;
 
                             (1.0, if k.is_nan() { [0.0; 4] } else { interpolate(&c.stops, k) })
                         }
@@ -800,6 +851,25 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_curvature_radius_only_where_written() {
+        let radius = |s: &str| {
+            Shading::parse(&format!("00000000!curvature_1.0_{s}")).map(|s| s.components[0].radius)
+        };
+
+        assert_eq!(radius("-0.1_ff0000ff_0.1_0000ffff").unwrap(), BUFFER);
+        assert_eq!(radius("16_-0.1_ff0000ff_0.1_0000ffff").unwrap(), 16);
+        assert_eq!(radius("16").unwrap(), 16);
+        assert!(radius("0_-0.1_ff0000ff_0.1_0000ffff").is_err());
+        assert!(radius("33_-0.1_ff0000ff_0.1_0000ffff").is_err());
+        assert_eq!(
+            Shading::parse("00000000!curvature_1.0_16_-0.1_ff0000ff_0.1_0000ffff!hillshade-igor_315.0_1.0_000000ff")
+                .unwrap()
+                .buffer(),
+            16
+        );
+    }
+
+    #[test]
     fn a_wider_buffer_shades_the_tile_the_same() {
         let wide = TileWindow::new(18, 143_940, 90_180, 20)
             .unwrap()
@@ -828,9 +898,6 @@ mod tests {
 
     #[test]
     fn matches_the_exact_port_to_within_one_level() {
-        let w = TileWindow::new(18, 143_940, 90_180, 20).unwrap();
-        let h = terrain(w.size());
-
         for s in [
             "000000ff!hillshade-classic_315.0_45.0_1.0_ffffffff",
             "00000000!hillshade-classic_315.0_45.0_1.0_ffffffff",
@@ -850,8 +917,14 @@ mod tests {
             "9e9591ff!slope-igor_2.0_0.000_9e959100_30.000_8a2408ff",
             "00000000!hillshade-classic~1.50~0.10_315.0_45.0_1.0_0.200_1c3c48ff_0.800_fff0dcff",
             "ffffffff!hillshade-igor_135.0_1.0_0.000_00000000_2.000_000000ff!slope-classic_45.0_1.0_0.000_00000000_1.000_ff0000ff",
+            "a09894ff!curvature_1.0_8_-0.400_fff2d6e6_-0.020_fff2d600_0.020_1c5c6600_0.400_1c5c66e6",
+            "00000000!curvature_2.0_27_-0.100_ffffffff_0.100_000000ff!hillshade-igor_315.0_1.0_00000099",
         ] {
             let shading = Shading::parse(s).unwrap();
+            let w = TileWindow::new(18, 143_940, 90_180, 20)
+                .unwrap()
+                .with_buffer(shading.buffer());
+            let h = terrain(w.size());
             let fast = shading.render(&h, &w);
             let exact = reference(&shading, &h, &w);
             let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as i32;
