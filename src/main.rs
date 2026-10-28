@@ -411,7 +411,7 @@ async fn hillshade(
     serve_tile(
         state,
         zxy,
-        shading.buffer(),
+        shading.buffer(zxy.0, zxy.2),
         &request,
         overzoom::dependencies,
         move |state, w| {

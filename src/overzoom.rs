@@ -136,7 +136,7 @@ impl Ancestors {
 
         let w = TileWindow::new(z, x, y, z)
             .ok_or(AppError::NotFound)?
-            .with_buffer(shading.buffer());
+            .with_buffer(shading.buffer(z, y));
 
         let planes = match mosaic::read(sources, &w, false)? {
             Some(m) => shading.render(&m.heights, &w),

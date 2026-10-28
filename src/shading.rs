@@ -4,7 +4,7 @@
 
 use crate::{
     error::AppError,
-    tile::{BUFFER, TILE, TileWindow},
+    tile::{self, BUFFER, TILE, TileWindow},
 };
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -22,6 +22,54 @@ enum Method {
     Aspect,
     Curvature,
     Contours,
+    SkyView,
+}
+
+/// How far a neighbourhood reaches each way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Radius {
+    Px(usize),
+    /// Ground metres, turned into pixels at the tile's zoom and latitude.
+    M(f32),
+}
+
+impl Radius {
+    fn parse(s: &str) -> Option<Self> {
+        match s.strip_suffix('m') {
+            Some(m) => m
+                .parse()
+                .ok()
+                .filter(|m: &f32| *m > 0.0 && *m <= MAX_RADIUS_M)
+                .map(Self::M),
+            None => s
+                .parse()
+                .ok()
+                .filter(|r| (1..=MAX_RADIUS).contains(r))
+                .map(Self::Px),
+        }
+    }
+
+    /// Pixels at the tile `z`/`y`: metres measured at its centre, rounded and
+    /// held to 1…`MAX_RADIUS`, as the client does.
+    fn px(self, z: u8, y: u32) -> usize {
+        match self {
+            Self::Px(r) => r,
+            Self::M(m) => {
+                ((m as f64 / tile::centre_ground_px(z, y)).round() as usize).clamp(1, MAX_RADIUS)
+            }
+        }
+    }
+}
+
+/// What a sky-view layer reads off the horizon.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SkyMode {
+    /// Share of the sky seen, 0–1.
+    Factor,
+    /// Mean angle from the zenith down to the horizon, degrees.
+    PositiveOpenness,
+    /// The same of the terrain turned upside down.
+    NegativeOpenness,
 }
 
 #[derive(Debug)]
@@ -30,8 +78,9 @@ struct Component {
     contrast: f32,
     brightness: f32,
     exaggeration: f32,
-    // Curvature's neighbourhood, pixels each way.
-    radius: usize,
+    // Curvature's and sky view's neighbourhood.
+    radius: Radius,
+    sky_mode: SkyMode,
     // Contours' spacing in metres and line width in pixels.
     interval: f32,
     line_width: f32,
@@ -83,8 +132,10 @@ fn color(s: &str) -> Result<Rgba, AppError> {
 
 const MAX_COMPONENTS: usize = 8;
 
-/// The widest curvature neighbourhood, pixels each way.
-const MAX_RADIUS: usize = 32;
+/// The widest neighbourhood, pixels each way: the widest buffer a tile has.
+const MAX_RADIUS: usize = tile::MAX_BUFFER;
+
+const MAX_RADIUS_M: f32 = 10_000.0;
 
 impl Shading {
     pub fn parse(s: &str) -> Result<Self, AppError> {
@@ -123,13 +174,21 @@ impl Shading {
                 "aspect" => Method::Aspect,
                 "curvature" => Method::Curvature,
                 "contours" => Method::Contours,
+                "sky-view" => Method::SkyView,
                 _ => return Err(AppError::BadRequest(format!("unknown component {kind}"))),
             };
 
             let (mut azimuth, mut altitude, mut exaggeration) = (f32::NAN, f32::NAN, 1.0);
             let (mut interval, mut line_width) = (f32::NAN, f32::NAN);
-            let mut radius = BUFFER;
+            let mut radius = Radius::Px(BUFFER);
+            let mut sky_mode = SkyMode::Factor;
             let mut stops = Vec::new();
+
+            let bad_radius = || {
+                AppError::BadRequest(format!(
+                    "radius must be 1 to {MAX_RADIUS} px, or metres up to {MAX_RADIUS_M} in {part}"
+                ))
+            };
 
             // The parameters, then one colour or `value_colour` pairs.
             let head = match method {
@@ -139,7 +198,7 @@ impl Shading {
                 Method::Curvature => 1 + params.len().saturating_sub(1) % 2,
                 Method::SlopeIgor => 1,
                 Method::HillshadeIgor | Method::SlopeClassic | Method::Contours => 2,
-                Method::HillshadeClassic => 3,
+                Method::HillshadeClassic | Method::SkyView => 3,
             };
 
             let colors = params.split_off(head.min(params.len()));
@@ -158,7 +217,10 @@ impl Shading {
 
             // The single-colour passes read the first stop.
             if stops.is_empty()
-                && !matches!(method, Method::ColorRelief | Method::Aspect | Method::Curvature)
+                && !matches!(
+                    method,
+                    Method::ColorRelief | Method::Aspect | Method::Curvature | Method::SkyView
+                )
             {
                 return Err(AppError::BadRequest(format!("no colour in {part}")));
             }
@@ -176,16 +238,19 @@ impl Shading {
                     exaggeration = next()?;
 
                     if let Some(r) = it.next() {
-                        radius = r
-                            .parse()
-                            .ok()
-                            .filter(|r| (1..=MAX_RADIUS).contains(r))
-                            .ok_or_else(|| {
-                                AppError::BadRequest(format!(
-                                    "curvature radius must be 1 to {MAX_RADIUS} in {part}"
-                                ))
-                            })?;
+                        radius = Radius::parse(r).ok_or_else(bad_radius)?;
                     }
+                }
+                Method::SkyView => {
+                    sky_mode = match it.next().unwrap_or_default() {
+                        "svf" => SkyMode::Factor,
+                        "pos" => SkyMode::PositiveOpenness,
+                        "neg" => SkyMode::NegativeOpenness,
+                        m => return Err(AppError::BadRequest(format!("unknown sky-view mode {m}"))),
+                    };
+
+                    exaggeration = num(it.next().unwrap_or_default())?;
+                    radius = Radius::parse(it.next().unwrap_or_default()).ok_or_else(bad_radius)?;
                 }
                 _ => {
                     if matches!(method, Method::HillshadeIgor | Method::HillshadeClassic) {
@@ -209,6 +274,7 @@ impl Shading {
                 brightness: brightness.unwrap_or(0.0),
                 exaggeration,
                 radius,
+                sky_mode,
                 interval,
                 line_width,
                 stops,
@@ -242,7 +308,9 @@ impl Shading {
     }
 
     /// Pixels `render` reads beyond each tile edge.
-    pub fn buffer(&self) -> usize {
+    /// A metre radius reads more pixels the deeper the zoom, so it depends on
+    /// the tile `z`/`y`.
+    pub fn buffer(&self, z: u8, y: u32) -> usize {
         self.components
             .iter()
             .map(|c| match c.method {
@@ -253,7 +321,7 @@ impl Shading {
                 | Method::ColorRelief
                 | Method::Aspect
                 | Method::Contours => BUFFER,
-                Method::Curvature => c.radius,
+                Method::Curvature | Method::SkyView => c.radius.px(z, y),
             })
             .fold(BUFFER, usize::max)
     }
@@ -360,10 +428,28 @@ impl Shading {
                 Method::Curvature => {
                     for y in 0..TILE {
                         let k = c.exaggeration / w.ground_px(y + b) as f32;
-                        let r = c.radius.min(b);
+                        let r = c.radius.px(w.z, w.y).min(b);
 
                         for x in 0..TILE {
                             let v = curvature(heights, size, x + b, y + b, r) * k;
+                            let col = if v.is_nan() {
+                                [0.0; 4]
+                            } else {
+                                interpolate(&c.stops, v)
+                            };
+
+                            acc.put(y * TILE + x, col[3] * alpha_k, col);
+                        }
+                    }
+                }
+                Method::SkyView => {
+                    let samples = sky_samples(c.radius.px(w.z, w.y).min(b));
+
+                    for y in 0..TILE {
+                        let ground = w.ground_px(y + b) as f32;
+
+                        for x in 0..TILE {
+                            let v = sky_view(heights, size, (x + b, y + b), &samples, ground / c.exaggeration, c.sky_mode);
                             let col = if v.is_nan() {
                                 [0.0; 4]
                             } else {
@@ -562,6 +648,109 @@ fn curvature_samples(r: usize) -> (usize, usize) {
     (step, r / step)
 }
 
+const S: f32 = 0.382_683_43;
+const C: f32 = 0.923_879_5;
+const H: f32 = 0.707_106_77;
+
+/// Unit steps every 22.5° clockwise from north, as literals the client's
+/// shader repeats: a GPU's sine is too loose to round the same offsets.
+const SKY_DIRECTIONS: [(f32, f32); 16] = [
+    (0.0, -1.0),
+    (S, -C),
+    (H, -H),
+    (C, -S),
+    (1.0, 0.0),
+    (C, S),
+    (H, H),
+    (S, C),
+    (0.0, 1.0),
+    (-S, C),
+    (-H, H),
+    (-C, S),
+    (-1.0, 0.0),
+    (-C, -S),
+    (-H, -H),
+    (-S, -C),
+];
+
+/// Distances walked out along each direction, pixels: denser near, where the
+/// horizon matters most.
+const SKY_STEPS: [usize; 12] = [1, 2, 3, 4, 6, 8, 11, 16, 23, 32, 45, 64];
+
+/// Per direction, the pixel offsets walked out to `r` (ending on `r`) and
+/// their lengths. The client's shader walks alike.
+fn sky_samples(r: usize) -> Vec<Vec<(isize, isize, f32)>> {
+    SKY_DIRECTIONS
+        .iter()
+        .map(|&(dx, dy)| {
+            SKY_STEPS
+                .iter()
+                .copied()
+                .filter(|&d| d < r)
+                .chain([r])
+                .map(|d| {
+                    // As the shader rounds; WGSL's round() takes halves to even.
+                    let (ox, oy) = ((dx * d as f32 + 0.5).floor(), (dy * d as f32 + 0.5).floor());
+
+                    (ox as isize, oy as isize, ox.hypot(oy))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The sky view at `x`, `y` in the buffered window, `size` pixels wide, from
+/// the horizon along `samples`; `run` is ground metres per pixel over the
+/// exaggeration. Pixels without data are left out; NaN when the centre has none.
+#[inline(always)]
+fn sky_view(
+    heights: &[f32],
+    size: usize,
+    (x, y): (usize, usize),
+    samples: &[Vec<(isize, isize, f32)>],
+    run: f32,
+    mode: SkyMode,
+) -> f32 {
+    let h0 = heights[y * size + x];
+    let (mut sum, mut n) = (0.0f32, 0.0f32);
+
+    for dir in samples {
+        // Steepest rise and fall, as height over distance.
+        let (mut hi, mut lo) = (f32::NEG_INFINITY, f32::INFINITY);
+
+        for &(ox, oy, d) in dir {
+            let h = heights[(y as isize + oy) as usize * size + (x as isize + ox) as usize];
+            let t = (h - h0) / (d * run);
+
+            if !t.is_nan() {
+                hi = hi.max(t);
+                lo = lo.min(t);
+            }
+        }
+
+        if hi == f32::NEG_INFINITY {
+            continue;
+        }
+
+        n += 1.0;
+
+        sum += match mode {
+            SkyMode::Factor => {
+                let t = hi.max(0.0);
+
+                t / (1.0 + t * t).sqrt()
+            }
+            SkyMode::PositiveOpenness => 90.0 - hi.atan().to_degrees(),
+            SkyMode::NegativeOpenness => 90.0 + lo.atan().to_degrees(),
+        };
+    }
+
+    match mode {
+        SkyMode::Factor => 1.0 - sum / n,
+        _ => sum / n,
+    }
+}
+
 /// Contour coverage from the height `h` and its change per pixel `grad`:
 /// antialiased over one pixel, 0 where either is NaN.
 #[inline(always)]
@@ -676,7 +865,10 @@ mod tests {
                 let (mut sum_rgb, mut sum_alpha, mut alpha_product) = ([0.0f32; 3], 0.0f32, 1.0f32);
 
                 for c in &s.components {
-                    let n = if matches!(c.method, Method::ColorRelief | Method::Curvature | Method::Contours) {
+                    let n = if matches!(
+                        c.method,
+                        Method::ColorRelief | Method::Curvature | Method::Contours | Method::SkyView
+                    ) {
                         [0.0, 0.0, 1.0]
                     } else {
                         normal(c.exaggeration)
@@ -717,8 +909,14 @@ mod tests {
                                 )
                             }
                         }
+                        Method::SkyView => {
+                            let samples = sky_samples(c.radius.px(w.z, w.y).min(b));
+                            let v = sky_view(heights, size, (x, y), &samples, ground / c.exaggeration, c.sky_mode);
+
+                            (1.0, if v.is_nan() { [0.0; 4] } else { interpolate(&c.stops, v) })
+                        }
                         Method::Curvature => {
-                            let (step, reach) = curvature_samples(c.radius.min(b));
+                            let (step, reach) = curvature_samples(c.radius.px(w.z, w.y).min(b));
                             let (mut sum, mut n) = (0.0, 0.0);
 
                             for i in 0..=2 * reach {
@@ -856,17 +1054,86 @@ mod tests {
             Shading::parse(&format!("00000000!curvature_1.0_{s}")).map(|s| s.components[0].radius)
         };
 
-        assert_eq!(radius("-0.1_ff0000ff_0.1_0000ffff").unwrap(), BUFFER);
-        assert_eq!(radius("16_-0.1_ff0000ff_0.1_0000ffff").unwrap(), 16);
-        assert_eq!(radius("16").unwrap(), 16);
+        assert_eq!(radius("-0.1_ff0000ff_0.1_0000ffff").unwrap(), Radius::Px(BUFFER));
+        assert_eq!(radius("16_-0.1_ff0000ff_0.1_0000ffff").unwrap(), Radius::Px(16));
+        assert_eq!(radius("16").unwrap(), Radius::Px(16));
+        assert_eq!(radius("12.5m_-0.1_ff0000ff_0.1_0000ffff").unwrap(), Radius::M(12.5));
         assert!(radius("0_-0.1_ff0000ff_0.1_0000ffff").is_err());
-        assert!(radius("33_-0.1_ff0000ff_0.1_0000ffff").is_err());
+        assert!(radius("65_-0.1_ff0000ff_0.1_0000ffff").is_err());
+        assert!(radius("0m_-0.1_ff0000ff_0.1_0000ffff").is_err());
         assert_eq!(
             Shading::parse("00000000!curvature_1.0_16_-0.1_ff0000ff_0.1_0000ffff!hillshade-igor_315.0_1.0_000000ff")
                 .unwrap()
-                .buffer(),
+                .buffer(18, 90_180),
             16
         );
+    }
+
+    #[test]
+    fn turns_metres_into_pixels_at_the_tile() {
+        // About 0.40 m a pixel at z18 near 48° N, 3.2 m at z15.
+        assert_eq!(Radius::M(20.0).px(18, 90_180), 51);
+        assert_eq!(Radius::M(20.0).px(15, 11_272), 6);
+        assert_eq!(Radius::M(20.0).px(10, 352), 1);
+        assert_eq!(Radius::M(100.0).px(18, 90_180), MAX_RADIUS);
+    }
+
+    #[test]
+    fn reads_sky_view_modes() {
+        for (s, mode) in [
+            ("svf", SkyMode::Factor),
+            ("pos", SkyMode::PositiveOpenness),
+            ("neg", SkyMode::NegativeOpenness),
+        ] {
+            let c = &Shading::parse(&format!("00000000!sky-view_{s}_1.0_10m_0.7_000000ff_1.0_00000000"))
+                .unwrap()
+                .components[0];
+
+            assert_eq!((c.sky_mode, c.radius), (mode, Radius::M(10.0)));
+        }
+
+        assert!(Shading::parse("00000000!sky-view_up_1.0_10_0.7_000000ff_1.0_00000000").is_err());
+    }
+
+    #[test]
+    fn sees_a_ditch_and_a_ridge() {
+        let w = TileWindow::new(18, 143_940, 90_180, 20).unwrap().with_buffer(8);
+        let size = w.size();
+        let samples = sky_samples(8);
+        let run = w.ground_px(size / 2) as f32;
+        let at = |profile: fn(f32) -> f32, mode| {
+            let h: Vec<f32> = (0..size * size)
+                .map(|i| profile((i % size) as f32 - (size / 2) as f32))
+                .collect();
+
+            sky_view(&h, size, (size / 2, size / 2), &samples, run, mode)
+        };
+
+        let flat = |_| 0.0;
+        let ditch = |x: f32| if x.abs() < 1.0 { -2.0 } else { 0.0 };
+        let ridge = |x: f32| if x.abs() < 1.0 { 2.0 } else { 0.0 };
+
+        assert_eq!(at(flat, SkyMode::Factor), 1.0);
+        assert!(at(ditch, SkyMode::Factor) < 0.9);
+        assert_eq!(at(ridge, SkyMode::Factor), 1.0);
+        assert_eq!(at(flat, SkyMode::PositiveOpenness), 90.0);
+        assert!(at(ridge, SkyMode::PositiveOpenness) > 100.0);
+        assert!(at(ditch, SkyMode::NegativeOpenness) > 100.0);
+    }
+
+    /// A GPU may fuse the multiply and add, rounding in the last bit apart from
+    /// the CPU: no offset may fall so near a half that this tips it.
+    #[test]
+    fn sky_offsets_round_alike_everywhere() {
+        for (k, &(dx, dy)) in SKY_DIRECTIONS.iter().enumerate() {
+            assert!((dx.hypot(dy) - 1.0).abs() < 1e-6, "direction {k} is not a unit");
+
+            for d in 1..=MAX_RADIUS {
+                for v in [dx * d as f32, dy * d as f32] {
+                    assert!((v.abs().fract() - 0.5).abs() > 1e-3, "direction {k} at {d}: {v}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -919,11 +1186,15 @@ mod tests {
             "ffffffff!hillshade-igor_135.0_1.0_0.000_00000000_2.000_000000ff!slope-classic_45.0_1.0_0.000_00000000_1.000_ff0000ff",
             "a09894ff!curvature_1.0_8_-0.400_fff2d6e6_-0.020_fff2d600_0.020_1c5c6600_0.400_1c5c66e6",
             "00000000!curvature_2.0_27_-0.100_ffffffff_0.100_000000ff!hillshade-igor_315.0_1.0_00000099",
+            "00000000!curvature_1.0_6.5m_-0.100_ffffffff_0.100_000000ff",
+            "ffffffff!sky-view_svf_1.0_12_0.700_000000ff_1.000_00000000",
+            "00000000!sky-view~1.20~0.05_pos_2.0_8m_60.000_000000ff_90.000_00000000_120.000_ffffffff",
+            "00000000!sky-view_neg_1.0_40_60.000_ffffffff_90.000_00000000_120.000_000000ff",
         ] {
             let shading = Shading::parse(s).unwrap();
             let w = TileWindow::new(18, 143_940, 90_180, 20)
                 .unwrap()
-                .with_buffer(shading.buffer());
+                .with_buffer(shading.buffer(18, 90_180));
             let h = terrain(w.size());
             let fast = shading.render(&h, &w);
             let exact = reference(&shading, &h, &w);

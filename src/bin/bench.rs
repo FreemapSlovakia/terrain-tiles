@@ -118,7 +118,7 @@ fn main() {
             for x in args.x0 / f..(args.x0 + args.n) / f {
                 let w = TileWindow::new(z, x, y, 18)
                     .unwrap()
-                    .with_buffer(shading.buffer());
+                    .with_buffer(shading.buffer(z, y));
 
                 let Some(m) = stats
                     .get("read + mosaic")

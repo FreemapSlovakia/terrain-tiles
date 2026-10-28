@@ -14,6 +14,15 @@ pub const BUFFER: usize = 2;
 /// The widest buffer a request may ask for.
 pub const MAX_BUFFER: usize = 64;
 
+/// Ground metres per pixel along the middle of tile row `y` at zoom `z`.
+pub fn centre_ground_px(z: u8, y: u32) -> f64 {
+    let px = PX_Z0 / (1u64 << z) as f64;
+    let merc_y = HALF_WORLD - (y as f64 + 0.5) * TILE as f64 * px;
+    let lat = (merc_y / HALF_WORLD * std::f64::consts::PI).sinh().atan();
+
+    px * lat.cos()
+}
+
 /// An XYZ tile plus its buffer.
 #[derive(Clone, Copy)]
 pub struct TileWindow {
